@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_selector"
+	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
 	"golang.org/x/sys/unix"
@@ -20,8 +21,9 @@ type Server struct {
 	config      *sd_config.Config
 	workers     []*WorkerIns
 	selector    sd_selector.Selector
-	mcPool      *sd_socket.MMsgContainerPool
+	sessionMgr  *sd_session.Manager
 	upstreamMgr *sd_upstream.Manager
+	mcPool      *sd_socket.MMsgContainerPool
 }
 
 func NewServer(config *sd_config.Config) *Server {
@@ -32,9 +34,10 @@ func NewServer(config *sd_config.Config) *Server {
 	}
 
 	return &Server{
-		workers:  make([]*WorkerIns, 0, config.Server.ListenParallel),
-		selector: selector,
-		mcPool:   sd_socket.NewMMsgContainerPool(config.Server.BatchSize, config.Server.BufSize),
+		workers:    make([]*WorkerIns, 0, config.Server.ListenParallel),
+		selector:   selector,
+		sessionMgr: sd_session.NewManager(config.Session),
+		mcPool:     sd_socket.NewMMsgContainerPool(config.Server.BatchSize, config.Server.BufSize),
 	}
 }
 

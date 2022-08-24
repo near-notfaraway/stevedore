@@ -54,15 +54,48 @@ type MMsgContainer struct {
 	Names   [][]byte
 }
 
-func (m *MMsgContainer) GetOneMsgLength(seq int) uint32 {
+func NewMMsgContainer(batchNum, mtu int) *MMsgContainer {
+	mmsg := make([]MMsgHdr, batchNum)
+	buffers := make([][]byte, batchNum)
+	names := make([][]byte, batchNum)
+
+	for i := range mmsg {
+		buffers[i] = make([]byte, mtu)
+		names[i] = make([]byte, SizeofSockaddrInet6)
+
+		iov := []IOVec{{
+			Base: (*byte)(unsafe.Pointer(&buffers[i][0])),
+			Len:  uint64(len(buffers[i]))}}
+
+		mmsg[i].Hdr.IOV = &iov[0]
+		mmsg[i].Hdr.IOVLen = uint64(len(iov))
+
+		mmsg[i].Hdr.Name = (*byte)(unsafe.Pointer(&names[i][0]))
+		mmsg[i].Hdr.NameLen = uint32(len(names[i]))
+
+		// ignore mms[i].Hdr.Control and mms[i].Hdr.ControlLen
+	}
+
+	return &MMsgContainer{
+		mmsg,
+		buffers,
+		names,
+	}
+}
+
+func (m *MMsgContainer) GetLengthOfMsg(seq int) uint32 {
 	return m.MMsg[seq].Len
 }
 
-func (m *MMsgContainer) GetOneMsgBuf(seq int) []byte {
+func (m *MMsgContainer) GetBufOfMsg(seq int) []byte {
 	return m.Buffers[seq]
 }
 
-func (m *MMsgContainer) GetOneMsgRAddr(seq int) unix.Sockaddr {
+func (m *MMsgContainer) GetRNamesOfMsg(seq int) string {
+	return string(m.Names[seq][:m.MMsg[seq].Hdr.NameLen])
+}
+
+func (m *MMsgContainer) GetRSockaddrOfMsg(seq int) unix.Sockaddr {
 	return NameBufferToSockaddr(m.Names[seq], m.MMsg[seq].Hdr.NameLen)
 }
 
@@ -92,32 +125,7 @@ func NewMMsgContainerPool(batchNum, mtu int) *MMsgContainerPool {
 		mtu:      mtu,
 		mcPool: sync.Pool{
 			New: func() interface{} {
-				mmsg := make([]MMsgHdr, batchNum)
-				buffers := make([][]byte, batchNum)
-				names := make([][]byte, batchNum)
-
-				for i := range mmsg {
-					buffers[i] = make([]byte, mtu)
-					names[i] = make([]byte, SizeofSockaddrInet6)
-
-					iov := []IOVec{{
-						Base: (*byte)(unsafe.Pointer(&buffers[i][0])),
-						Len:  uint64(len(buffers[i]))}}
-
-					mmsg[i].Hdr.IOV = &iov[0]
-					mmsg[i].Hdr.IOVLen = uint64(len(iov))
-
-					mmsg[i].Hdr.Name = (*byte)(unsafe.Pointer(&names[i][0]))
-					mmsg[i].Hdr.NameLen = uint32(len(names[i]))
-
-					// ignore mms[i].Hdr.Control and mms[i].Hdr.ControlLen
-				}
-
-				return &MMsgContainer{
-					mmsg,
-					buffers,
-					names,
-				}
+				return NewMMsgContainer(batchNum, mtu)
 			},
 		},
 	}
