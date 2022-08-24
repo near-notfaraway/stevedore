@@ -6,6 +6,8 @@ type Config struct {
 		ServerAddr string
 	}
 
+	Log *LogConfig
+
 	Server *struct {
 		ListenAddr         string // listening address
 		ListenParallel     int    // number of worker listening at the same time
@@ -16,4 +18,12 @@ type Config struct {
 		TaskPoolSize       int    // capacity of task pool
 		TaskPoolTimeoutSec int    // timeout of worker in task pool
 	}
+}
+
+type LogConfig struct {
+	Path             string // log file path
+	Level            string // log level
+	Verbose          bool   // log caller information
+	MaxAgeHour       int    // max age for clean up expired log
+	RotationTimeHour int    // time interval of rotating log
 }
