@@ -17,8 +17,10 @@ type Config struct {
 		BufSize            int    // size of single read/write buffer
 		TaskPoolSize       int    // capacity of task pool
 		TaskPoolTimeoutSec int    // timeout of worker in task pool
-		MaxTryTimes        int    // max try times for upload upstream
+		MaxTryTimes        int    // max try times of upload packet to upstream
 	}
+
+	Upload *UploadConfig
 
 	Session *SessionConfig
 }
@@ -29,6 +31,33 @@ type LogConfig struct {
 	Verbose          bool   // log caller information
 	MaxAgeHour       int    // max age for clean up expired log
 	RotationTimeHour int    // time interval of rotating log
+}
+
+type UploadConfig struct {
+	Upstreams []*UpstreamConfig
+	Routes    []RouteConfig
+}
+
+type UpstreamConfig struct {
+	Name                string
+	Peers               []*PeerConfig
+	HeartbeatIntervalMs int
+	HeartbeatTimeoutMs  int
+	SuccessTimes        int
+	FailedTimes         int
+}
+
+type PeerConfig struct {
+	IP     string
+	Port   int
+	Weight int
+}
+
+type RouteConfig struct {
+	Operator string
+	Bytes    string
+	Value    string
+	Upstream string
 }
 
 type SessionConfig struct {

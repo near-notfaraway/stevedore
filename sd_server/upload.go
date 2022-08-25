@@ -1,10 +1,12 @@
 package sd_server
 
 import (
-	"code.byted.org/gopkg/logs"
 	"context"
 	"fmt"
+	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
+	"github.com/near-notfaraway/stevedore/sd_upstream"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"os"
 )
@@ -25,7 +27,7 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 				nPkt, err := sd_socket.RecvMMsg(ins.fd, mc)
 				if nPkt < 1 || err != nil {
 					if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
-						fmt.Errorf("%w", os.NewSyscallError("recvmmsg", err))
+						logrus.Errorf("recv upload packet failed: %w", os.NewSyscallError("recvmmsg", err))
 					}
 					break
 				}
@@ -37,6 +39,7 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 					rName := mc.GetRNamesOfMsg(i)
 					rSockaddr := mc.GetRSockaddrOfMsg(i)
 
+					// get session
 					sess := s.sessionMgr.GetSession(rName)
 					if sess == nil {
 						sess, got := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
@@ -45,30 +48,56 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 						}
 					}
 
+					// try to get and send peer
 					for try := 0; try < s.config.Server.MaxTryTimes; try++ {
-						// 获取 upstream
-						_upstream := sess.GetUpstream()
-						if _upstream == nil {
-							if _upstream, err = s.upstreamMgr.Route(hdr.Cid); err != nil {
-								logs.Errorf("route to upstream failed: %v", err)
-								break
-							}
-							sess.SetUpstream(_upstream)
-						}
-
-						// 发送数据到 upstream
-						err := _upstream.Send(sess.upstreamFdIdx, buf[:nr])
+						peer, err := s.selectPeer(sess, buf[:nr])
 						if err != nil {
-							if err == UpstreamDeadErr {
-								continue
-							}
-							logs.Errorf("send to upstream %s failed: %v", _upstream.addr.String(), err)
+							logrus.Errorf("select peer failed: %v", buf[:nr])
+							break
 						}
 
-						try ++
-						continue
+						err = peer.Send(sess.GetFD(), buf[:nr])
+						if err != nil {
+							if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
+								peer.SetState(sd_upstream.PeerDead)
+							}
+							continue
+						}
+
+						break
 					}
+
+					// upload failed
+					logrus.Errorf("upload failed, packet data: %v", buf[:nr])
 				}
 			}
 		}
 	}
+}
+
+func (s *Server) selectPeer(sess *sd_session.Session, data []byte) (*sd_upstream.Peer, error) {
+	// use cache peer
+	peer := sess.GetPeer()
+	if peer != nil {
+		return peer, nil
+	}
+
+	// use cache upstream or route upstream
+	upstream := sess.GetUpstream()
+	if upstream == nil {
+		upstream = s.upstreamMgr.RouteUpstream(data)
+		if upstream == nil {
+			return nil, fmt.Errorf("route upstream failed")
+		}
+		sess.SetUpstream(upstream)
+	}
+
+	// select peer
+	peer = upstream.SelectPeer()
+	if peer == nil {
+		return nil, fmt.Errorf("select peer failed")
+	}
+	sess.SetPeer(peer)
+
+	return peer, nil
+}

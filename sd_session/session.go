@@ -11,6 +11,7 @@ type Session struct {
 	name       string                // string converted from downstream address
 	sa         unix.Sockaddr         // downstream sockaddr
 	lastActive int64                 // last active timestamp base on second
+	fd         int                   // fd used to upload packet
 	upstream   *sd_upstream.Upstream // destination upstream
 	peer       *sd_upstream.Peer     // destination peer of upstream
 }
@@ -49,4 +50,8 @@ func (s *Session) UpdateActive() {
 
 func (s *Session) LastActive() int64 {
 	return atomic.LoadInt64(&s.lastActive)
+}
+
+func (s *Session) GetFD() int {
+	return s.fd
 }

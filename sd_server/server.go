@@ -34,10 +34,11 @@ func NewServer(config *sd_config.Config) *Server {
 	}
 
 	return &Server{
-		workers:    make([]*WorkerIns, 0, config.Server.ListenParallel),
-		selector:   selector,
-		sessionMgr: sd_session.NewManager(config.Session),
-		mcPool:     sd_socket.NewMMsgContainerPool(config.Server.BatchSize, config.Server.BufSize),
+		workers:     make([]*WorkerIns, 0, config.Server.ListenParallel),
+		selector:    selector,
+		sessionMgr:  sd_session.NewManager(config.Session),
+		upstreamMgr: sd_upstream.NewManager(config.Upload),
+		mcPool:      sd_socket.NewMMsgContainerPool(config.Server.BatchSize, config.Server.BufSize),
 	}
 }
 

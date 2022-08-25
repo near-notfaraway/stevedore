@@ -1,0 +1,20 @@
+{
+  "Upload": {
+    "Upstreams": [
+      {
+        "Peers": [
+          {
+            "IP": "10.0.0.1",
+            "Port": 2345,
+            "Weight": 1
+          }
+        ]
+      }
+    ],
+    "Routes": [
+      {
+        "Operator": ""
+      }
+    ]
+  }
+}
