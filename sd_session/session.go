@@ -12,6 +12,7 @@ type Session struct {
 	sa         unix.Sockaddr         // downstream sockaddr
 	lastActive int64                 // last active timestamp base on second
 	fd         int                   // fd used to upload packet
+	ch         chan struct{}         // fd used to recv download event
 	upstream   *sd_upstream.Upstream // destination upstream
 	peer       *sd_upstream.Peer     // destination peer of upstream
 }
@@ -22,10 +23,6 @@ func NewSession(name string, sa unix.Sockaddr) *Session {
 		sa:         sa,
 		lastActive: time.Now().Unix(),
 	}
-}
-
-func (s *Session) Init() {
-
 }
 
 func (s *Session) GetUpstream() *sd_upstream.Upstream {
@@ -52,6 +49,14 @@ func (s *Session) LastActive() int64 {
 	return atomic.LoadInt64(&s.lastActive)
 }
 
+func (s *Session) GetSockaddr() unix.Sockaddr {
+	return s.sa
+}
+
 func (s *Session) GetFD() int {
 	return s.fd
+}
+
+func (s *Session) GetCh() chan struct{} {
+	return s.ch
 }

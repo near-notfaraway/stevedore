@@ -1,7 +1,9 @@
 package sd_session
 
 import (
+	"fmt"
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_socket"
 	"golang.org/x/sys/unix"
 	"sync"
 	"time"
@@ -11,12 +13,14 @@ type Manager struct {
 	recycleInterval time.Duration // time interval of recycle session
 	timeoutSec      int64         // timeout for recycle session
 	sessions        sync.Map      // map[string]*Session
+	evChanPool      sync.Pool     // allocate event chan
 }
 
-func NewManager(config *sd_config.SessionConfig) *Manager {
+func NewManager(config *sd_config.SessionConfig, evChanPool sync.Pool) *Manager {
 	m := &Manager{
 		recycleInterval: time.Second * time.Duration(config.RecycleIntervalSec),
 		timeoutSec:      config.TimeoutSec,
+		evChanPool:      evChanPool,
 	}
 	go m.sessionRecycle()
 
@@ -31,23 +35,31 @@ func (m *Manager) sessionRecycle() {
 			sess := v.(*Session)
 			if time.Now().Unix()-sess.LastActive() > m.timeoutSec {
 				m.sessions.Delete(key)
+				m.evChanPool.Put(sess.ch)
 			}
 			return true
 		})
 	}
 }
 
-func (m *Manager) GetOrCreateSession(name string, sa unix.Sockaddr) (*Session, bool) {
+func (m *Manager) GetOrCreateSession(name string, sa unix.Sockaddr) (*Session, bool, error) {
 	sess := NewSession(name, sa)
 	actualSess, loaded := m.sessions.LoadOrStore(name, sess)
 
 	if loaded {
 		ss := actualSess.(*Session)
 		ss.UpdateActive()
-		return ss, loaded
+		return ss, loaded, nil
 	}
 
-	return sess, loaded
+	fd, err := sd_socket.UDPSocket(unix.AF_INET, true, false, false)
+	if err != nil {
+		return nil, false, fmt.Errorf("create socket for session failed: %w", err)
+	}
+	sess.fd = fd
+	sess.ch = m.evChanPool.Get().(chan struct{})
+
+	return sess, loaded, nil
 }
 
 func (m *Manager) GetSession(name string) *Session {

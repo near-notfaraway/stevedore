@@ -5,7 +5,9 @@ go 1.17
 require (
 	github.com/lestrrat/go-file-rotatelogs v0.0.0-20180223000712-d3151e2a480f
 	github.com/sirupsen/logrus v1.9.0
+	github.com/tidwall/jsonc v0.3.2
 	golang.org/x/sys v0.0.0-20220818161305-2296e01440c6
+	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c
 )
 
 require (

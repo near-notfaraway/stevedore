@@ -3,6 +3,7 @@ package sd_server
 import (
 	"context"
 	"fmt"
+	"github.com/near-notfaraway/stevedore/sd_selector"
 	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
@@ -42,9 +43,20 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 					// get session
 					sess := s.sessionMgr.GetSession(rName)
 					if sess == nil {
-						sess, got := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
+						sess, got, err := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
+						if err != nil {
+							logrus.Errorf("%w, data: %v", err, buf[:nr])
+							continue
+						}
+
 						if !got {
-							sess.Init()
+							fs := [2]func(){func() { sess.GetCh() <- struct{}{} }, nil}
+							err = s.selector.Add(sess.GetFD(), sd_selector.SelectorEventRead, fs)
+							if err != nil {
+								logrus.Errorf("add seletor for session failed: %w, data: %v", err, buf[:nr])
+								continue
+							}
+							go s.downloadWorker(s.ctx, sess)
 						}
 					}
 
@@ -52,7 +64,7 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 					for try := 0; try < s.config.Server.MaxTryTimes; try++ {
 						peer, err := s.selectPeer(sess, buf[:nr])
 						if err != nil {
-							logrus.Errorf("select peer failed: %v", buf[:nr])
+							logrus.Errorf("%w: data: %v", err, buf[:nr])
 							break
 						}
 

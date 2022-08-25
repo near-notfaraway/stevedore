@@ -6,7 +6,7 @@ import (
 	"syscall"
 )
 
-func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (fd int, err error) {
+func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (int, error) {
 	var family int
 	switch sa.(type) {
 	case *unix.SockaddrInet4:
@@ -15,6 +15,23 @@ func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (fd i
 		family = unix.AF_INET6
 	default:
 		return -1, fmt.Errorf("sockaddr family is not inet")
+	}
+
+	fd, err := UDPSocket(family, nonblock, reuseAddr, reusePort)
+	if err != nil {
+		return fd, err
+	}
+
+	if err = unix.Bind(fd, sa); err != nil {
+		return -1, fmt.Errorf("bind sockaddr failed: %w", err)
+	}
+
+	return fd, nil
+}
+
+func UDPSocket(family int, nonblock, reuseAddr, reusePort bool) (fd int, err error) {
+	if (family != unix.AF_INET) && (family != unix.AF_INET6) {
+		return -1, fmt.Errorf("family is not inet")
 	}
 
 	typ := unix.SOCK_DGRAM | unix.SOCK_CLOEXEC
@@ -41,11 +58,5 @@ func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (fd i
 		}
 	}
 
-	if err = unix.Bind(fd, sa); err != nil {
-		return -1, fmt.Errorf("bind sockaddr failed: %w", err)
-	}
-
 	return fd, nil
 }
-
-

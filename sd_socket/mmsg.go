@@ -123,11 +123,7 @@ func NewMMsgContainerPool(batchNum, mtu int) *MMsgContainerPool {
 	return &MMsgContainerPool{
 		batchNum: batchNum,
 		mtu:      mtu,
-		mcPool: sync.Pool{
-			New: func() interface{} {
-				return NewMMsgContainer(batchNum, mtu)
-			},
-		},
+
 	}
 }
 

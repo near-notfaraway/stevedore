@@ -36,5 +36,5 @@ func NewUpstream(config *sd_config.UpstreamConfig) *Upstream {
 }
 
 func (u *Upstream) SelectPeer() *Peer {
-
+	return u.peers[0]
 }
