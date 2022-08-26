@@ -1,28 +1,16 @@
 package sd_config
 
 type Config struct {
-	PProf *struct {
-		Open       bool
-		ServerAddr string
-	}
-
-	Log *LogConfig
-
-	Server *struct {
-		ListenAddr         string // listening address
-		ListenParallel     int    // number of worker listening at the same time
-		EventSize          int    // size of events polling from selector
-		EventChanSize      int    // size of events delivering to worker non-blocking
-		BatchSize          int    // size of batch read/write packets
-		BufSize            int    // size of single read/write buffer
-		TaskPoolSize       int    // capacity of task pool
-		TaskPoolTimeoutSec int    // timeout of worker in task pool
-		MaxTryTimes        int    // max try times of upload packet to upstream
-	}
-
-	Upload *UploadConfig
-
+	PProf   *PProfConfig
+	Log     *LogConfig
+	Server  *ServerConfig
+	Upload  *UploadConfig
 	Session *SessionConfig
+}
+
+type PProfConfig struct {
+	Open       bool
+	ServerAddr string
 }
 
 type LogConfig struct {
@@ -31,6 +19,18 @@ type LogConfig struct {
 	Verbose          bool   // log caller information
 	MaxAgeHour       int    // max age for clean up expired log
 	RotationTimeHour int    // time interval of rotating log
+}
+
+type ServerConfig struct {
+	ListenAddr         string // listening address
+	ListenParallel     int    // number of worker listening at the same time
+	EventSize          int    // size of events polling from selector
+	EventChanSize      int    // size of events delivering to worker non-blocking
+	BatchSize          int    // size of batch read/write packets
+	BufSize            int    // size of single read/write buffer
+	TaskPoolSize       int    // capacity of task pool
+	TaskPoolTimeoutSec int    // timeout of worker in task pool
+	MaxTryTimes        int    // max try times of upload packet to upstream
 }
 
 type UploadConfig struct {

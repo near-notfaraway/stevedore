@@ -49,6 +49,10 @@ func (s *Session) LastActive() int64 {
 	return atomic.LoadInt64(&s.lastActive)
 }
 
+func (s *Session) GetName() string {
+	return s.name
+}
+
 func (s *Session) GetSockaddr() unix.Sockaddr {
 	return s.sa
 }

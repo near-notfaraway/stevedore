@@ -123,7 +123,11 @@ func NewMMsgContainerPool(batchNum, mtu int) *MMsgContainerPool {
 	return &MMsgContainerPool{
 		batchNum: batchNum,
 		mtu:      mtu,
-
+		mcPool: sync.Pool{
+			New: func() interface{} {
+				return NewMMsgContainer(batchNum, mtu)
+			},
+		},
 	}
 }
 
@@ -139,14 +143,16 @@ func (m *MMsgContainerPool) PutMMsgContainerToPool(mc *MMsgContainer) {
 // MMsg related func which wrapped syscall
 //------------------------------------------------------------------------------
 
-func RecvMMsg(fd int, mc *MMsgContainer) (int, error) {
-	n, _, err := unix.Syscall6(unix.SYS_RECVMMSG, uintptr(fd),
-		uintptr(unsafe.Pointer(&mc.MMsg[0])), uintptr(len(mc.MMsg)), 0, 0, 0)
-	return int(n), err
+func RecvMMsg(fd int, mc *MMsgContainer) (int, unix.Errno) {
+	n, _, errno := unix.Syscall6(unix.SYS_RECVMMSG, uintptr(fd),
+		uintptr(unsafe.Pointer(&mc.MMsg[0])), uintptr(len(mc.MMsg)), unix.MSG_WAITFORONE, 0, 0)
+
+	return int(n), errno
 }
 
 func SendMMsg(fd int, mc *MMsgContainer) (int, error) {
-	n, _, err := unix.Syscall6(unix.SYS_SENDMMSG, uintptr(fd),
+	n, _, errno := unix.Syscall6(unix.SYS_SENDMMSG, uintptr(fd),
 		uintptr(unsafe.Pointer(&mc.MMsg[0])), uintptr(len(mc.MMsg)), 0, 0, 0)
-	return int(n), err
+
+	return int(n), errno
 }

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func InitLogger(conf sd_config.LogConfig) error {
+func InitLogger(conf *sd_config.LogConfig) error {
 	// parse conf
 	writer, err := rotatelogs.New(
 		conf.Path+".%Y%m%d",
@@ -28,6 +28,9 @@ func InitLogger(conf sd_config.LogConfig) error {
 	logrus.SetOutput(writer)
 	logrus.SetLevel(level)
 	logrus.SetReportCaller(conf.Verbose)
+	logrus.SetFormatter(&logrus.TextFormatter{
+		ForceQuote:                true,
+	})
 
 	return nil
 }

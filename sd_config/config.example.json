@@ -1,7 +1,34 @@
 {
+  "PProf": {
+    "Open": true,
+    "ServerAddr": ":6060"
+  },
+  "Log": {
+    "Path": "./log/stevedore.log",
+    "Level": "debug",
+    "Verbose": false,
+    "MaxAgeHour": 24,
+    "RotationTimeHour": 168
+  },
+  "Server": {
+    "ListenAddr": "0.0.0.0:2614",
+    "ListenParallel": 4,
+    "EventSize": 1024,
+    "EventChanSize": 1024,
+    "BatchSize": 32,
+    "BufSize": 4096,
+    "TaskPoolSize": 64,
+    "TaskPoolTimeoutSec": 10,
+    "MaxTryTimes": 3
+  },
+  "Session": {
+    "RecycleIntervalSec": 10,
+    "TimeoutSec": 30
+  },
   "Upload": {
     "Upstreams": [
       {
+        "Name": "default",
         "Peers": [
           {
             "IP": "10.0.0.1",
@@ -12,9 +39,6 @@
       }
     ],
     "Routes": [
-      {
-        "Operator": ""
-      }
     ]
   }
 }

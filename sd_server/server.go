@@ -8,6 +8,7 @@ import (
 	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"sync"
 )
@@ -43,6 +44,7 @@ func NewServer(config *sd_config.Config) *Server {
 	}
 
 	return &Server{
+		config:      config,
 		workers:     make([]*WorkerIns, 0, config.Server.ListenParallel),
 		selector:    selector,
 		sessionMgr:  sd_session.NewManager(config.Session, evChanPool),
@@ -77,7 +79,9 @@ func (s *Server) ListenAndServe() error {
 			return fmt.Errorf("add listen conn to selector failed: %w", err)
 		}
 
-		s.workers = append(s.workers, &WorkerIns{id: i, fd: fd, ch: ch})
+		worker := &WorkerIns{id: i, fd: fd, ch: ch}
+		s.workers = append(s.workers, worker)
+		go s.uploadWorker(ctx, worker)
 	}
 
 	// 关闭服务
@@ -90,5 +94,6 @@ func (s *Server) ListenAndServe() error {
 	}()
 
 	// 开始 polling
+	logrus.Debug("start polling...")
 	return s.selector.Polling(ctx)
 }

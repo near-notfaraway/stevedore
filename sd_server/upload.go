@@ -13,10 +13,12 @@ import (
 )
 
 func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
+	logger := logrus.WithField("work_id", ins.id)
+	logger.Debug("init worker")
 	mc := s.mcPool.GetMMsgContainerFromPool()
 	defer s.mcPool.PutMMsgContainerToPool(mc)
 
-	// recv selector event util ctx cancel
+	logger.Debug("wait for read event until ctx canceled")
 	for {
 		select {
 		case <-ctx.Done():
@@ -24,43 +26,59 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 
 		case <-ins.ch:
 			for {
-				// recv packets in batches
-				nPkt, err := sd_socket.RecvMMsg(ins.fd, mc)
-				if nPkt < 1 || err != nil {
-					if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
-						logrus.Errorf("recv upload packet failed: %w", os.NewSyscallError("recvmmsg", err))
+				logger.Debug("a read event came in, batch recv packets")
+				nPkt, errno := sd_socket.RecvMMsg(ins.fd, mc)
+				if nPkt < 1 || errno != 0 {
+					if errno == unix.EAGAIN || errno == unix.EWOULDBLOCK {
+						logger.Debug("no packets to recv, should wait for recv event again")
+					} else {
+						logger.Errorf("recv packets failed: %w", os.NewSyscallError("recvmmsg", errno))
 					}
 					break
 				}
 
-				// process packets one by one
+				logger.Debugf("recv %d packets, process packets one by one", nPkt)
 				for i := 0; i < nPkt; i++ {
+					logger.Debugf("processing packet %d and extract info", i)
 					nr := mc.GetLengthOfMsg(i)
 					buf := mc.GetBufOfMsg(i)
 					rName := mc.GetRNamesOfMsg(i)
 					rSockaddr := mc.GetRSockaddrOfMsg(i)
+					logger.Debugf("packet info: remote addr is %v, data is %v",
+						sd_socket.SockaddrToUDPAddr(rSockaddr).String(), buf[:nr])
 
 					// get session
 					sess := s.sessionMgr.GetSession(rName)
 					if sess == nil {
-						sess, got, err := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
+						logger.Debugf("try create new session for packet")
+						var got bool
+						_sess, got, err := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
 						if err != nil {
-							logrus.Errorf("%w, data: %v", err, buf[:nr])
+							logger.Errorf("create session failed: %w,", err)
 							continue
 						}
 
 						if !got {
-							fs := [2]func(){func() { sess.GetCh() <- struct{}{} }, nil}
-							err = s.selector.Add(sess.GetFD(), sd_selector.SelectorEventRead, fs)
+							logger.Debugf("init new session %p for packet", _sess)
+							fs := [2]func(){func() { _sess.GetCh() <- struct{}{} }, nil}
+							err = s.selector.Add(_sess.GetFD(), sd_selector.SelectorEventRead, fs)
 							if err != nil {
-								logrus.Errorf("add seletor for session failed: %w, data: %v", err, buf[:nr])
+								logger.Errorf("add selector for session failed: %w", err)
 								continue
 							}
-							go s.downloadWorker(s.ctx, sess)
+							go s.downloadWorker(s.ctx, _sess)
+
+						} else {
+							logger.Debugf("session %p for packet is existed", _sess)
 						}
+						sess = _sess
+
+					} else {
+						logger.Debugf("session %p for packet is existed", sess)
 					}
 
-					// try to get and send peer
+					logger.Debugf("try to get peer and send data to it")
+					succeed := false
 					for try := 0; try < s.config.Server.MaxTryTimes; try++ {
 						peer, err := s.selectPeer(sess, buf[:nr])
 						if err != nil {
@@ -76,11 +94,15 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 							continue
 						}
 
+						succeed = true
 						break
 					}
 
 					// upload failed
-					logrus.Errorf("upload failed, packet data: %v", buf[:nr])
+					if !succeed {
+						logrus.Errorf("upload failed, packet data: %v", buf[:nr])
+					}
+					break
 				}
 			}
 		}

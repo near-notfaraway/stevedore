@@ -60,6 +60,7 @@ func NewEpoller(eventSize int, et bool, taskPool TaskPool) (Selector, error) {
 		fd:        fd,
 		eventSize: eventSize,
 		et:        et,
+		fdHandlers: make(map[int32][2]func()),
 		taskPool:  taskPool,
 	}, nil
 }

@@ -10,6 +10,7 @@ import (
 )
 
 func (s *Server) downloadWorker(ctx context.Context, sess *sd_session.Session) {
+	logger := logrus.WithField("session_name", sess.GetName())
 	mc := s.mcPool.GetMMsgContainerFromPool()
 	defer s.mcPool.PutMMsgContainerToPool(mc)
 
@@ -22,10 +23,12 @@ func (s *Server) downloadWorker(ctx context.Context, sess *sd_session.Session) {
 		case <-sess.GetCh():
 			for {
 				// recv packets in batches
-				nPkt, err := sd_socket.RecvMMsg(sess.GetFD(), mc)
-				if nPkt < 1 || err != nil {
-					if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
-						logrus.Errorf("recv upload packet failed: %w", os.NewSyscallError("recvmmsg", err))
+				nPkt, errno := sd_socket.RecvMMsg(sess.GetFD(), mc)
+				if nPkt < 1 || errno != 0 {
+					if errno == unix.EAGAIN || errno == unix.EWOULDBLOCK {
+						logger.Debug("no packets to recv, should wait for recv event again")
+					} else {
+						logger.Errorf("recv packets failed: %w", os.NewSyscallError("recvmmsg", errno))
 					}
 					break
 				}
@@ -36,11 +39,13 @@ func (s *Server) downloadWorker(ctx context.Context, sess *sd_session.Session) {
 					buf := mc.GetBufOfMsg(i)
 
 					// 发送数据回 client
-					err = unix.Sendto(s.workers[0].fd, buf[:nr], 0, sess.GetSockaddr())
+					err := unix.Sendto(s.workers[0].fd, buf[:nr], 0, sess.GetSockaddr())
 					if err != nil {
 						logrus.Error("write to udp fail: %v", err)
 					}
 				}
+
+				break
 			}
 		}
 	}

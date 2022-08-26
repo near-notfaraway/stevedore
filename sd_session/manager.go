@@ -54,7 +54,7 @@ func (m *Manager) GetOrCreateSession(name string, sa unix.Sockaddr) (*Session, b
 
 	fd, err := sd_socket.UDPSocket(unix.AF_INET, true, false, false)
 	if err != nil {
-		return nil, false, fmt.Errorf("create socket for session failed: %w", err)
+		return nil, false, fmt.Errorf("create socket failed: %w", err)
 	}
 	sess.fd = fd
 	sess.ch = m.evChanPool.Get().(chan struct{})
