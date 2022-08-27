@@ -6,6 +6,8 @@ import (
 	"syscall"
 )
 
+// Create a udp socket which bound addr, also support general flag
+// Returns err if create fails
 func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (int, error) {
 	var family int
 	switch sa.(type) {
@@ -29,7 +31,9 @@ func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (int,
 	return fd, nil
 }
 
-func UDPSocket(family int, nonblock, reuseAddr, reusePort bool) (fd int, err error) {
+// Create a udp socket, also support general flag
+// Returns err if create fails
+func UDPSocket(family int, nonblock, reuseAddr, reusePort bool) (int, error) {
 	if (family != unix.AF_INET) && (family != unix.AF_INET6) {
 		return -1, fmt.Errorf("family is not inet")
 	}
@@ -39,7 +43,7 @@ func UDPSocket(family int, nonblock, reuseAddr, reusePort bool) (fd int, err err
 		typ |= unix.SOCK_NONBLOCK
 	}
 
-	fd, err = unix.Socket(family, typ, unix.IPPROTO_UDP)
+	fd, err := unix.Socket(family, typ, unix.IPPROTO_UDP)
 	if err != nil {
 		return -1, fmt.Errorf("create socket failed: %w", err)
 	}
@@ -59,4 +63,24 @@ func UDPSocket(family int, nonblock, reuseAddr, reusePort bool) (fd int, err err
 	}
 
 	return fd, nil
+}
+
+// Set send or recv timeout for socket
+// Returns err if set fails
+func SetSocketTimeout(fd, sTimeoutSec, rTimeoutSec int) error {
+	if sTimeoutSec > 0 {
+		if err := syscall.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO,
+			&syscall.Timeval{Sec: int64(sTimeoutSec)}); err != nil {
+			return fmt.Errorf("set fd %s send timeout fail: %w", fd, err)
+		}
+	}
+
+	if rTimeoutSec > 0 {
+		if err := syscall.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO,
+			&syscall.Timeval{Sec: int64(rTimeoutSec)}); err != nil {
+			return fmt.Errorf("set fd %s recv timeout fail: %w",  fd, err)
+		}
+	}
+
+	return nil
 }

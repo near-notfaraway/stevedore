@@ -52,3 +52,9 @@ func (p *Peer) SetState(state PeerState) {
 	defer p.mu.Unlock()
 	p.state = state
 }
+
+func (p *Peer) isAlive() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.state == PeerAlive
+}

@@ -47,7 +47,7 @@ func NewServer(config *sd_config.Config) *Server {
 		config:      config,
 		workers:     make([]*WorkerIns, 0, config.Server.ListenParallel),
 		selector:    selector,
-		sessionMgr:  sd_session.NewManager(config.Session, evChanPool),
+		sessionMgr:  sd_session.NewManager(config.Session, evChanPool, selector),
 		upstreamMgr: sd_upstream.NewManager(config.Upload),
 		mcPool:      sd_socket.NewMMsgContainerPool(config.Server.BatchSize, config.Server.BufSize),
 		evChanPool:  evChanPool,

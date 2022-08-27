@@ -3,6 +3,7 @@ package sd_session
 import (
 	"fmt"
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_selector"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"golang.org/x/sys/unix"
 	"sync"
@@ -10,17 +11,19 @@ import (
 )
 
 type Manager struct {
-	recycleInterval time.Duration // time interval of recycle session
-	timeoutSec      int64         // timeout for recycle session
-	sessions        sync.Map      // map[string]*Session
-	evChanPool      sync.Pool     // allocate event chan
+	recycleInterval time.Duration        // time interval of recycle session
+	timeoutSec      int64                // timeout for recycle session
+	sessions        sync.Map             // map[string]*Session
+	evChanPool      sync.Pool            // allocate event chan
+	selector        sd_selector.Selector // unregister fd when recycle
 }
 
-func NewManager(config *sd_config.SessionConfig, evChanPool sync.Pool) *Manager {
+func NewManager(config *sd_config.SessionConfig, evChanPool sync.Pool, selector sd_selector.Selector) *Manager {
 	m := &Manager{
 		recycleInterval: time.Second * time.Duration(config.RecycleIntervalSec),
 		timeoutSec:      config.TimeoutSec,
 		evChanPool:      evChanPool,
+		selector:		 selector,
 	}
 	go m.sessionRecycle()
 
@@ -35,6 +38,7 @@ func (m *Manager) sessionRecycle() {
 			sess := v.(*Session)
 			if time.Now().Unix()-sess.LastActive() > m.timeoutSec {
 				m.sessions.Delete(key)
+				_ = m.selector.Del(sess.fd)
 				m.evChanPool.Put(sess.ch)
 			}
 			return true

@@ -39,18 +39,22 @@ type UploadConfig struct {
 }
 
 type UpstreamConfig struct {
-	Name                string
-	Peers               []*PeerConfig
-	HeartbeatIntervalMs int
-	HeartbeatTimeoutMs  int
-	SuccessTimes        int
-	FailedTimes         int
+	Name          string
+	Peers         []*PeerConfig
+	HealthChecker *HealthCheckerConfig
 }
 
 type PeerConfig struct {
 	IP     string
 	Port   int
 	Weight int
+}
+
+type HealthCheckerConfig struct {
+	HeartbeatIntervalSec int
+	HeartbeatTimeoutSec  int
+	SuccessTimes         int
+	FailedTimes          int
 }
 
 type RouteConfig struct {

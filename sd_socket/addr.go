@@ -11,8 +11,8 @@ const (
 	SizeofSockaddrInet6 = 0x1c
 )
 
-// Converts a net.UDPAddr to a Sockaddr.
-// Returns nil if conversion fails.
+// Converts a net.UDPAddr to a Sockaddr
+// Returns nil if conversion fails
 func UDPAddrToSockaddr(addr *net.UDPAddr) unix.Sockaddr {
 	// undefined IP address, use IPv6 default
 	if addr.IP == nil {
@@ -70,7 +70,7 @@ func ip6ZoneToInt(zone string) int {
 }
 
 // Converts a unix.Sockaddr to a net.UDPAddr
-// Returns nil if conversion fails.
+// Returns nil if conversion fails
 func SockaddrToUDPAddr(sa unix.Sockaddr) *net.UDPAddr {
 	switch sa := sa.(type) {
 	case *unix.SockaddrInet4:
@@ -116,7 +116,7 @@ func ip6ZoneToString(zone int) string {
 }
 
 // Resolve a string addr to a Sockaddr
-// Returns nil if resolve fails.
+// Returns nil if resolve fails
 func ResolveUDPSockaddr(strAddr string) unix.Sockaddr {
 	netAddr, err := net.ResolveUDPAddr("udp", strAddr)
 	if err != nil {
@@ -127,7 +127,7 @@ func ResolveUDPSockaddr(strAddr string) unix.Sockaddr {
 }
 
 // Converts a name buffer to a Sockaddr
-// Returns nil if conversion fails.
+// Returns nil if conversion fails
 func NameBufferToSockaddr(buf []byte, len uint32) unix.Sockaddr {
 	switch len {
 	case SizeofSockaddrInet4:
@@ -151,6 +151,8 @@ func NameBufferToSockaddr(buf []byte, len uint32) unix.Sockaddr {
 	return nil
 }
 
+// Converts a name buffer to a net.UDPAddr
+// Returns nil if conversion fails
 func NameBufferToUDPAddr(buf []byte, len uint32) *net.UDPAddr {
 	switch len {
 	case SizeofSockaddrInet4:

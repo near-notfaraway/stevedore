@@ -10,6 +10,8 @@ const DefaultUpstreamName = "default"
 type Upstream struct {
 	name  string
 	peers []*Peer
+	healthChecker    *HealthChecker
+
 }
 
 func NewUpstream(config *sd_config.UpstreamConfig) *Upstream {
@@ -32,6 +34,7 @@ func NewUpstream(config *sd_config.UpstreamConfig) *Upstream {
 	return &Upstream{
 		name:  config.Name,
 		peers: peers,
+		healthChecker: NewHealthChecker(config.HealthChecker, peers),
 	}
 }
 

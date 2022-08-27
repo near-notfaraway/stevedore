@@ -29,6 +29,12 @@
     "Upstreams": [
       {
         "Name": "default",
+        "HealthChecker": {
+          "HeartbeatIntervalMs": 5000,
+          "HeartbeatTimeoutMs": 5000,
+          "SuccessTimes": 1,
+          "FailedTimes": 1
+        },
         "Peers": [
           {
             "IP": "10.0.0.1",
