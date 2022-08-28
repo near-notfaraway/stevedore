@@ -29,6 +29,8 @@
     "Upstreams": [
       {
         "Name": "default",
+        "Type": "chash",
+        "KeyBytes": "8:16",
         "HealthChecker": {
           "HeartbeatIntervalMs": 5000,
           "HeartbeatTimeoutMs": 5000,

@@ -22,7 +22,7 @@ type Peer struct {
 	id       int
 	addr     string
 	sockaddr unix.Sockaddr
-	wight    int
+	weight   int
 	state    PeerState
 }
 
@@ -36,7 +36,7 @@ func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
 		id:       id,
 		addr:     addr,
 		sockaddr: sockaddr,
-		wight:    config.Weight,
+		weight:   config.Weight,
 		state:    PeerAlive,
 	}
 }

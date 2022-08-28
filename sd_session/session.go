@@ -8,13 +8,13 @@ import (
 )
 
 type Session struct {
-	name       string                // string converted from downstream address
-	sa         unix.Sockaddr         // downstream sockaddr
-	lastActive int64                 // last active timestamp base on second
-	fd         int                   // fd used to upload packet
-	ch         chan struct{}         // fd used to recv download event
-	upstream   *sd_upstream.Upstream // destination upstream
-	peer       *sd_upstream.Peer     // destination peer of upstream
+	name       string               // string converted from downstream address
+	sa         unix.Sockaddr        // downstream sockaddr
+	lastActive int64                // last active timestamp base on second
+	fd         int                  // fd used to upload packet
+	ch         chan struct{}        // fd used to recv download event
+	upstream   sd_upstream.Upstream // destination upstream
+	peer       *sd_upstream.Peer    // destination peer of upstream
 }
 
 func NewSession(name string, sa unix.Sockaddr) *Session {
@@ -25,11 +25,11 @@ func NewSession(name string, sa unix.Sockaddr) *Session {
 	}
 }
 
-func (s *Session) GetUpstream() *sd_upstream.Upstream {
+func (s *Session) GetUpstream() sd_upstream.Upstream {
 	return s.upstream
 }
 
-func (s *Session) SetUpstream(upstream *sd_upstream.Upstream) {
+func (s *Session) SetUpstream(upstream sd_upstream.Upstream) {
 	s.upstream = upstream
 }
 
