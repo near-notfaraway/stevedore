@@ -61,8 +61,8 @@ type HealthCheckerConfig struct {
 
 type RouteConfig struct {
 	Operator string
-	Bytes    string
 	Value    string
+	KeyBytes string
 	Upstream string
 }
 

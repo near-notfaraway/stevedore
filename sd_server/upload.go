@@ -13,6 +13,7 @@ import (
 )
 
 func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
+	// init logger for upload worker
 	logger := logrus.WithField("work_id", ins.id)
 	logger.Debug("init worker")
 	mc := s.mcPool.GetMMsgContainerFromPool()

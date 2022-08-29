@@ -26,6 +26,14 @@
     "TimeoutSec": 30
   },
   "Upload": {
+    "Routes": [
+      {
+        "KeyBytes": "0:8",
+        "Operator": "==",
+        "Value": "0x69",
+        "Upstream": "default"
+      }
+    ],
     "Upstreams": [
       {
         "Name": "default",
@@ -45,8 +53,6 @@
           }
         ]
       }
-    ],
-    "Routes": [
     ]
   }
 }

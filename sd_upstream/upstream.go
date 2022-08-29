@@ -11,7 +11,7 @@ import (
 const DefaultUpstreamName = "default"
 
 type Upstream interface {
-	SelectPeer() *Peer
+	SelectPeer(data []byte) *Peer
 }
 
 type CHashUpstream struct {
@@ -23,7 +23,7 @@ type CHashUpstream struct {
 	healthChecker *HealthChecker
 }
 
-func NewCHashUpstream(config *sd_config.UpstreamConfig) *CHashUpstream {
+func NewCHashUpstream(config *sd_config.UpstreamConfig) Upstream {
 	peers := make([]*Peer, 0, len(config.Peers))
 	uniqueMap := make(map[string]struct{})
 
