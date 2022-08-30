@@ -34,8 +34,9 @@ type ServerConfig struct {
 }
 
 type UploadConfig struct {
-	Upstreams []*UpstreamConfig
-	Routes    []RouteConfig
+	DefaultUpstream string
+	Upstreams       []*UpstreamConfig
+	Routes          []RouteConfig
 }
 
 type UpstreamConfig struct {

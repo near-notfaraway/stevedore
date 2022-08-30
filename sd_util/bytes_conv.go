@@ -75,7 +75,7 @@ func bitStringToBytes(s string) ([]byte, error) {
 	return src[:i], nil
 }
 
-// fromBitChar converts a bit character into its value and a error
+// Converts a bit character into its value and a error
 func fromBitChar(c byte) (byte, error) {
 	switch {
 	case c == '0':

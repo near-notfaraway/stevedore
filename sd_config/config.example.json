@@ -26,9 +26,10 @@
     "TimeoutSec": 30
   },
   "Upload": {
+    "DefaultUpstream": "default",
     "Routes": [
       {
-        "KeyBytes": "0:8",
+        "KeyBytes": "0:1",
         "Operator": "==",
         "Value": "0x69",
         "Upstream": "default"
@@ -38,7 +39,7 @@
       {
         "Name": "default",
         "Type": "chash",
-        "KeyBytes": "8:16",
+        "KeyBytes": "1:3",
         "HealthChecker": {
           "HeartbeatIntervalMs": 5000,
           "HeartbeatTimeoutMs": 5000,

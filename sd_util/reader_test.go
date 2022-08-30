@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// should succeed unmarshal json file
+// Should succeed unmarshal json file
 func TestUnmarshalFile_Json(t *testing.T) {
 	jsonFile := "../sd_config/config.example.json"
 	var config sd_config.Config

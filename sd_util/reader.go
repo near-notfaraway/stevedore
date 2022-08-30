@@ -14,6 +14,7 @@ const (
 	FilePostYaml    = "yaml"
 )
 
+// Read file and unmarshal it into a struct
 func UnmarshalFile(filename string, v interface{}) error {
 	// read file
 	buf, err := ioutil.ReadFile(filename)

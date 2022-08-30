@@ -44,7 +44,7 @@ func bytesEqual(leftVal, rightVal []byte) bool {
 }
 
 // Return (l | r) == r
-// if a bit of r is 0, then related bit of l must be 0
+// If a bit of r is 0, then related bit of l must be 0
 func bytesOrThenEqual(leftVal, rightVal []byte) bool {
 	tmp := make([]byte, len(leftVal))
 	for i := 0; i < len(tmp); i++ {
@@ -55,7 +55,7 @@ func bytesOrThenEqual(leftVal, rightVal []byte) bool {
 }
 
 // Return (l & r) == r
-// if a bit of r is 1, then related bit of l must be 1
+// If a bit of r is 1, then related bit of l must be 1
 func bytesAndThenEqual(leftVal, rightVal []byte) bool {
 	tmp := make([]byte, len(leftVal))
 	for i := 0; i < len(tmp); i++ {

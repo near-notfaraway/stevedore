@@ -23,7 +23,7 @@ func NewManager(config *sd_config.SessionConfig, evChanPool sync.Pool, selector 
 		recycleInterval: time.Second * time.Duration(config.RecycleIntervalSec),
 		timeoutSec:      config.TimeoutSec,
 		evChanPool:      evChanPool,
-		selector:		 selector,
+		selector:        selector,
 	}
 	go m.sessionRecycle()
 
@@ -36,9 +36,11 @@ func (m *Manager) sessionRecycle() {
 		m.sessions.Range(func(k, v interface{}) bool {
 			key := k.(string)
 			sess := v.(*Session)
+			// delete expired session
 			if time.Now().Unix()-sess.LastActive() > m.timeoutSec {
 				m.sessions.Delete(key)
 				_ = m.selector.Del(sess.fd)
+				_ = unix.Close(sess.fd)
 				m.evChanPool.Put(sess.ch)
 			}
 			return true
@@ -47,23 +49,26 @@ func (m *Manager) sessionRecycle() {
 }
 
 func (m *Manager) GetOrCreateSession(name string, sa unix.Sockaddr) (*Session, bool, error) {
+	// try to create new session
 	sess := NewSession(name, sa)
 	actualSess, loaded := m.sessions.LoadOrStore(name, sess)
+	_sess := actualSess.(*Session)
 
 	if loaded {
-		ss := actualSess.(*Session)
-		ss.UpdateActive()
-		return ss, loaded, nil
+		// not actually created, update active
+		_sess.UpdateActive()
+
+	} else {
+		// actually created, init fd and ch
+		fd, err := sd_socket.UDPSocket(unix.AF_INET, true, false, false)
+		if err != nil {
+			return nil, false, fmt.Errorf("create socket failed: %w", err)
+		}
+		_sess.fd = fd
+		_sess.ch = m.evChanPool.Get().(chan struct{})
 	}
 
-	fd, err := sd_socket.UDPSocket(unix.AF_INET, true, false, false)
-	if err != nil {
-		return nil, false, fmt.Errorf("create socket failed: %w", err)
-	}
-	sess.fd = fd
-	sess.ch = m.evChanPool.Get().(chan struct{})
-
-	return sess, loaded, nil
+	return _sess, loaded, nil
 }
 
 func (m *Manager) GetSession(name string) *Session {

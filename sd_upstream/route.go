@@ -2,47 +2,67 @@ package sd_upstream
 
 import (
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_util"
 	"github.com/sirupsen/logrus"
 	"strconv"
 	"strings"
 )
 
 type Route struct {
-	id       int
-	operator string
-	keyStart int
-	keyEnd   int
-	value    string
-	upstream string
+	id         int
+	operator   string
+	bytesStart int
+	bytesEnd   int
+	bytesValue []byte
+	upstream   string
 }
 
 func NewRoute(id int, config sd_config.RouteConfig) *Route {
-	// init key start and key end
-	keyIdx := strings.Split(config.KeyBytes, ":")
-	keyStart, err := strconv.Atoi(keyIdx[0])
+	// init bytes start and bytes end
+	bytesIdx := strings.Split(config.KeyBytes, ":")
+	bytesStart, err := strconv.Atoi(bytesIdx[0])
 	if err != nil {
-		logrus.Panicf("key start %s is invalid in route %d", keyIdx[0], id)
+		logrus.Panicf("bytes start %s is invalid in route %d", bytesIdx[0], id)
 	}
-	keyEnd, err := strconv.Atoi(keyIdx[1])
+	bytesEnd, err := strconv.Atoi(bytesIdx[1])
 	if err != nil {
-		logrus.Panicf("key end %s is invalid in route %d", keyIdx[1], id)
+		logrus.Panicf("bytes end %s is invalid in route %d", bytesIdx[1], id)
 	}
-	if keyStart >= keyEnd {
-		logrus.Panicf("key start %s >= key end %s in route %s", keyIdx[0], keyIdx[1], id)
+	if bytesStart >= bytesEnd {
+		logrus.Panicf("bytes start %s is not less than bytes end %s in route %d", bytesIdx[0], bytesIdx[1], id)
+	}
+
+	// init bytes value
+	bytesValue, err := sd_util.StringToBytes(config.Value)
+	if err != nil {
+		logrus.Panicf("value %s invalid in route %d: %w", config.Value, id, err)
+	}
+	if len(bytesValue) != (bytesEnd - bytesStart) {
+		logrus.Panicf("value length is not bytes length in route %d: %w", config.Value, id, err)
 	}
 
 	return &Route{
-		id:       id,
-		operator: config.Operator,
-		keyStart: keyStart,
-		keyEnd:   keyEnd,
-		value:    config.Value,
-		upstream: config.Upstream,
+		id:         id,
+		operator:   config.Operator,
+		bytesStart: bytesStart,
+		bytesEnd:   bytesEnd,
+		bytesValue: bytesValue,
+		upstream:   config.Upstream,
 	}
 }
 
 func (r *Route) Match(data []byte) bool {
-	key := data[r.keyStart:r.keyEnd]
+	// data too short
+	if len(data) < r.bytesEnd {
+		return false
+	}
 
-	return true
+	// extract bytes and operate
+	bytes := data[r.bytesStart:r.bytesEnd]
+	matched, err := sd_util.BytesOperate(r.operator, bytes, r.bytesValue)
+	if err != nil {
+		logrus.Errorf("route match operation failed: %w", err)
+	}
+
+	return matched
 }

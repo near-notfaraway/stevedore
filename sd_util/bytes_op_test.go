@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// invalid value or operator
+// Invalid value or operator
 func TestBytesOperate1(t *testing.T) {
 	leftVal := []byte{113, 24, 255, 21}
 	rightVal := []byte{113, 24, 255}
@@ -17,7 +17,7 @@ func TestBytesOperate1(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
-// equal operation
+// Equal operation
 func TestBytesOperate2(t *testing.T) {
 	leftVal := []byte{113, 24, 255}
 	rightVal := []byte{113, 24, 255}
@@ -30,7 +30,7 @@ func TestBytesOperate2(t *testing.T) {
 	assert.Equal(t, false, rst)
 }
 
-// or then equal operation: bits of right value is 0, make sure related bits of right value are 0
+// Or then equal operation: bits of right value is 0, make sure related bits of right value are 0
 func TestBytesOperate3(t *testing.T) {
 	leftVal := []byte{0, 0x44}
 	rightVal := []byte{0xff, 0x44}
@@ -43,7 +43,7 @@ func TestBytesOperate3(t *testing.T) {
 	assert.Equal(t, false, rst)
 }
 
-// and then equal operation: bits of right value is 1, make sure related bits of right value are 1
+// And then equal operation: bits of right value is 1, make sure related bits of right value are 1
 func TestBytesOperate4(t *testing.T) {
 	leftVal := []byte{0x22, 0xfc}
 	rightVal := []byte{0x00, 0x0c}

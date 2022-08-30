@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// hex string should be process succeed
+// Hex string should be process succeed
 func TestStringToBytes1(t *testing.T) {
 	s := "0x1234"
 	bytes, err := StringToBytes(s)
@@ -27,7 +27,7 @@ func TestStringToBytes1(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
-// bit string should be process succeed
+// Bit string should be process succeed
 func TestStringToBytes2(t *testing.T) {
 	s := "0b1011101110111001"
 	bytes, err := StringToBytes(s)

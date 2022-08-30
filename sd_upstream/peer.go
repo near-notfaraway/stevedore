@@ -58,3 +58,7 @@ func (p *Peer) isAlive() bool {
 	defer p.mu.RUnlock()
 	return p.state == PeerAlive
 }
+
+func (p *Peer) GetAddr() string {
+	return p.addr
+}
