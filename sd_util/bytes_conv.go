@@ -2,6 +2,7 @@ package sd_util
 
 import "fmt"
 
+// Converts a hex string or bit string into byte slice and a error
 func StringToBytes(s string) ([]byte, error) {
 	flag := s[:2]
 	switch flag {
