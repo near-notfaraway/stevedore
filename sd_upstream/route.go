@@ -8,13 +8,17 @@ import (
 	"strings"
 )
 
+//------------------------------------------------------------------------------
+// Route: Used to choose upstream according to data
+//------------------------------------------------------------------------------
+
 type Route struct {
-	id         int
-	operator   string
-	bytesStart int
-	bytesEnd   int
-	bytesValue []byte
-	upstream   string
+	id         int    // unique id
+	operator   string // bytes operation type
+	bytesStart int    // start index used to extract data
+	bytesEnd   int    // end index used to extract data
+	bytesValue []byte // bytes used to operate with data
+	upstream   string // target upstream
 }
 
 func NewRoute(id int, config sd_config.RouteConfig) *Route {

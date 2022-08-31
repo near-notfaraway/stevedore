@@ -1,7 +1,6 @@
 package sd_upstream
 
 import (
-	"context"
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/sirupsen/logrus"
@@ -11,7 +10,7 @@ import (
 )
 
 //------------------------------------------------------------------------------
-// HealthChecker: Used to update upstream health state
+// HealthChecker: Used to update peer's health state
 //------------------------------------------------------------------------------
 
 type HealthChecker struct {
@@ -19,7 +18,7 @@ type HealthChecker struct {
 	heartbeatInterval time.Duration
 	successTimes      int
 	failedTimes       int
-	successCounter    []int
+	succeedCounter    []int
 	failedCounter     []int
 	checkFds          []int
 	counterMu         sync.Mutex
@@ -27,7 +26,7 @@ type HealthChecker struct {
 
 func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *HealthChecker {
 	// init counter
-	successCounter := make([]int, len(peers))
+	succeedCounter := make([]int, len(peers))
 	failedCounter := make([]int, len(peers))
 
 	// init check fd
@@ -50,29 +49,22 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 		successTimes:      config.SuccessTimes,
 		failedTimes:       config.FailedTimes,
 		failedCounter:     failedCounter,
-		successCounter:    successCounter,
+		succeedCounter:    succeedCounter,
 		checkFds:          checkFds,
 	}
 }
 
-func (c *HealthChecker) Check(ctx context.Context, changedCh chan<- struct{}) {
+func (c *HealthChecker) Check(changedCh chan<- struct{}) {
 	tick := time.NewTicker(c.heartbeatInterval)
 	defer tick.Stop()
 
 	wg := &sync.WaitGroup{}
 	for range tick.C {
-		select {
-
-		case <-ctx.Done():
-			break
-
-		default:
-			for _, peer := range c.peers {
-				wg.Add(1)
-				go c.checkOnePeer(peer, wg, changedCh)
-			}
-			wg.Wait()
+		for _, peer := range c.peers {
+			wg.Add(1)
+			go c.checkOnePeer(peer, wg, changedCh)
 		}
+		wg.Wait()
 	}
 }
 
@@ -100,7 +92,7 @@ func (c *HealthChecker) handleFailedCheck(peer *Peer) bool {
 	c.counterMu.Lock()
 	defer c.counterMu.Unlock()
 	c.failedCounter[peer.id] += 1
-	c.successCounter[peer.id] = 0
+	c.succeedCounter[peer.id] = 0
 	if peer.isAlive() && c.failedCounter[peer.id] >= c.failedTimes {
 		peer.SetState(PeerDead)
 		return true
@@ -111,9 +103,9 @@ func (c *HealthChecker) handleFailedCheck(peer *Peer) bool {
 func (c *HealthChecker) handleSuccessCheck(peer *Peer) bool {
 	c.counterMu.Lock()
 	defer c.counterMu.Unlock()
-	c.successCounter[peer.id] += 1
+	c.succeedCounter[peer.id] += 1
 	c.failedCounter[peer.id] = 0
-	if !peer.isAlive() && c.successCounter[peer.id] >= c.successTimes {
+	if !peer.isAlive() && c.succeedCounter[peer.id] >= c.successTimes {
 		peer.SetState(PeerAlive)
 		return true
 	}

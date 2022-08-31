@@ -30,12 +30,14 @@ type CHashUpstream struct {
 	name          string
 	peers         []*Peer
 	cHash         *ConsistentHash
+	cache         map[string]*Peer
 	keyStart      int
 	keyEnd        int
 	healthChecker *HealthChecker
 }
 
 func NewCHashUpstream(config *sd_config.UpstreamConfig) Upstream {
+	// init upstreams and its peers
 	peers := make([]*Peer, 0, len(config.Peers))
 	uniqueMap := make(map[string]struct{})
 
@@ -66,17 +68,26 @@ func NewCHashUpstream(config *sd_config.UpstreamConfig) Upstream {
 		logrus.Panicf("key start %s >= key end %s in upstream %s", keyIdx[0], keyIdx[1], config.Name)
 	}
 
-	// init chash
+	// init chash and health checker
 	cHash := NewConsistentHash(peers)
 	cHash.UpdateLookupTable()
+	changedCh := make(chan struct{})
+	healthChecker := NewHealthChecker(config.HealthChecker, peers)
+	go healthChecker.Check(changedCh)
+	go func() {
+		select {
+		case <-changedCh:
+			cHash.UpdateLookupTable()
+		}
+	}()
 
 	return &CHashUpstream{
 		name:          config.Name,
 		peers:         peers,
+		cHash:         cHash,
 		keyStart:      keyStart,
 		keyEnd:        keyEnd,
-		cHash:         cHash,
-		healthChecker: NewHealthChecker(config.HealthChecker, peers),
+		healthChecker: healthChecker,
 	}
 }
 

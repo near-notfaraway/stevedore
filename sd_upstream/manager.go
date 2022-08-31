@@ -5,7 +5,8 @@ import (
 )
 
 //------------------------------------------------------------------------------
-// Manager: Used to manager and route upstream
+// Manager: Used to manager routes and upstreams
+// - choose upstream according to matched route
 //------------------------------------------------------------------------------
 
 type Manager struct {
@@ -51,5 +52,6 @@ func (m *Manager) RouteUpstream(data []byte) Upstream {
 		}
 	}
 
+	// use default upstream when not match
 	return m.defaultUpstream
 }

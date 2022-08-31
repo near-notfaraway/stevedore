@@ -2,7 +2,6 @@ package sd_server
 
 import (
 	"context"
-	"github.com/near-notfaraway/stevedore/sd_selector"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
 	"github.com/sirupsen/logrus"
@@ -24,8 +23,9 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 			return
 
 		case <-ins.ch:
+			logger.Debug("a read event came in, continue batch recv packets")
 			for {
-				logger.Debug("a read event came in, batch recv packets")
+				logger.Debug("do batch recv packets")
 				nPkt, errno := sd_socket.RecvMMsg(ins.fd, mc)
 				if nPkt < 1 || errno != 0 {
 					if errno == unix.EAGAIN || errno == unix.EWOULDBLOCK {
@@ -59,11 +59,12 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 
 						if !got {
 							logger.Debugf("init new session %p for packet", _sess)
-							fs := [2]func(){func() { _sess.GetCh() <- struct{}{} }, nil}
-							err = s.selector.Add(_sess.GetFD(), sd_selector.SelectorEventRead, fs)
-							if err != nil {
+							s.fdHandles.Store(_sess.GetFD(), [2]func(){func() { _sess.GetCh() <- struct{}{} }, nil})
+							if err = s.selector.Add(_sess.GetFD(), sd_socket.SelectorEventRead); err != nil {
 								logger.Errorf("add selector for session failed: %w", err)
 								continue
+							} else {
+								s.fdHandles.Delete(_sess.GetFD())
 							}
 							go s.downloadWorker(s.ctx, _sess)
 
