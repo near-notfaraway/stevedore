@@ -15,11 +15,11 @@ func TestSimpleTaskPool_NewTask1(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		taskPool := NewSimpleTaskPool(0, 10)
 		wg.Add(1)
-		Go(func() {
+		taskPool.Go(func() {
 			atomic.AddInt64(&finished, 1)
 			wg.Done()
 		})
-		if WorkerCount() < 1 {
+		if taskPool.WorkerCount() < 1 {
 			t.Errorf("worker start failed\n")
 		}
 	}
@@ -38,11 +38,11 @@ func TestSimpleTaskPool_NewTask2(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		Go(func() {
+		taskPool.Go(func() {
 			atomic.AddInt64(&finished, 1)
 			wg.Done()
 		})
-		if WorkerCount() < 1 {
+		if taskPool.WorkerCount() < 1 {
 			t.Errorf("worker start failed\n")
 		}
 	}
@@ -53,7 +53,7 @@ func TestSimpleTaskPool_NewTask2(t *testing.T) {
 	}
 
 	time.Sleep(time.Second * 11)
-	if WorkerCount() > 0 {
+	if taskPool.WorkerCount() > 0 {
 		t.Errorf("workerNum recycle failed\n")
 	}
 }
@@ -67,11 +67,11 @@ func TestSimpleTaskPool_NewTask3(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
-			Go(func() {
+			taskPool.Go(func() {
 				atomic.AddInt64(&finished, 1)
 				wg.Done()
 			})
-			if WorkerCount() < 1 {
+			if taskPool.WorkerCount() < 1 {
 				t.Errorf("worker start failed\n")
 			}
 		}()
@@ -83,7 +83,7 @@ func TestSimpleTaskPool_NewTask3(t *testing.T) {
 	}
 
 	time.Sleep(time.Second * 11)
-	if WorkerCount() > 0 {
+	if taskPool.WorkerCount() > 0 {
 		t.Errorf("workerNum recycle failed\n")
 	}
 }
@@ -97,7 +97,7 @@ func BenchmarkNewSimpleTaskPool1(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		wg.Add(1)
-		Go(func() {
+		taskPool.Go(func() {
 			wg.Done()
 		})
 	}
