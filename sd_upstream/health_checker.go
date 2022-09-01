@@ -14,14 +14,15 @@ import (
 //------------------------------------------------------------------------------
 
 type HealthChecker struct {
-	peers             []*Peer
-	heartbeatInterval time.Duration
-	successTimes      int
-	failedTimes       int
-	succeedCounter    []int
-	failedCounter     []int
-	checkFds          []int
-	counterMu         sync.Mutex
+	peers             []*Peer       // all peers
+	heartbeatInterval time.Duration // check interval
+	heartbeatTimeout  time.Duration // check timeout
+	successTimes      int           // set peer alive if exceeds it
+	failedTimes       int           // set peer dead if exceeds it
+	succeedCounter    []int         // succeed times counter for peers
+	failedCounter     []int         // failed times counter for peers
+	checkFds          []int         // used to send check packet
+	counterMu         sync.Mutex    // counter lock
 }
 
 func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *HealthChecker {
@@ -36,9 +37,8 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 		if err != nil {
 			logrus.Panic("init fd for health checker failed: %w", err)
 		}
-		err = sd_socket.SetSocketTimeout(fd, config.HeartbeatTimeoutSec, config.HeartbeatTimeoutSec)
-		if err != nil {
-			logrus.Panic("set fd timeout for health checker failed: %w", err)
+		if err := unix.Connect(fd, peer.sockaddr); err != nil {
+			logrus.Error("connect upstream %s failed: %w", peer.addr)
 		}
 		checkFds[peer.id] = fd
 	}
@@ -46,6 +46,7 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 	return &HealthChecker{
 		peers:             peers,
 		heartbeatInterval: time.Second * time.Duration(config.HeartbeatIntervalSec),
+		heartbeatTimeout:  time.Second * time.Duration(config.HeartbeatTimeoutSec),
 		successTimes:      config.SuccessTimes,
 		failedTimes:       config.FailedTimes,
 		failedCounter:     failedCounter,
@@ -55,26 +56,42 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 }
 
 func (c *HealthChecker) Check(changedCh chan<- struct{}) {
+	c.checkPeers(changedCh)
 	tick := time.NewTicker(c.heartbeatInterval)
 	defer tick.Stop()
 
-	wg := &sync.WaitGroup{}
 	for range tick.C {
-		for _, peer := range c.peers {
-			wg.Add(1)
-			go c.checkOnePeer(peer, wg, changedCh)
-		}
-		wg.Wait()
+		c.checkPeers(changedCh)
 	}
+}
+
+func (c *HealthChecker) checkPeers(changedCh chan<- struct{}) {
+	wg := &sync.WaitGroup{}
+	for _, peer := range c.peers {
+		wg.Add(1)
+		go c.checkOnePeer(peer, wg, changedCh)
+	}
+	wg.Wait()
 }
 
 func (c *HealthChecker) checkOnePeer(peer *Peer, wg *sync.WaitGroup, changedCh chan<- struct{}) {
 	defer wg.Done()
 	checkBuf := []byte("check")
 	checkFd := c.checkFds[peer.id]
+	timer := time.NewTimer(c.heartbeatTimeout)
 
-	err := unix.Sendto(checkFd, checkBuf, 0, peer.sockaddr)
+	err := unix.Send(checkFd, checkBuf, 0)
 	if err != nil {
+		logrus.Debugf("result of check on upstream %s is failed ", peer.addr)
+		if c.handleFailedCheck(peer) {
+			changedCh <- struct{}{}
+		}
+		return
+	}
+
+	<-timer.C
+	v, err := unix.GetsockoptInt(checkFd, unix.SOL_SOCKET, unix.SO_ERROR)
+	if err != nil || v != 0 {
 		logrus.Debugf("result of check on upstream %s is failed ", peer.addr)
 		if c.handleFailedCheck(peer) {
 			changedCh <- struct{}{}

@@ -80,11 +80,11 @@ func (s *Server) ListenAndServe() error {
 			return fmt.Errorf("create listen socket failed: %w", err)
 		}
 
+		logrus.Debugf("store fd %d", fd)
 		s.fdHandles.Store(fd, [2]func(){func() { ch <- struct{}{} }, nil})
 		if err = s.selector.Add(fd, sd_socket.SelectorEventRead); err != nil {
-			return fmt.Errorf("add listen conn to selector failed: %w", err)
-		} else {
 			s.fdHandles.Delete(fd)
+			return fmt.Errorf("add listen conn to selector failed: %w", err)
 		}
 
 		worker := &WorkerIns{id: i, fd: fd, ch: ch}

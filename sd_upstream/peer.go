@@ -17,13 +17,17 @@ const (
 	PeerDead
 )
 
+//------------------------------------------------------------------------------
+// Peer: Used to upload packet
+//------------------------------------------------------------------------------
+
 type Peer struct {
-	mu       sync.RWMutex
-	id       int
-	addr     string
-	sockaddr unix.Sockaddr
-	weight   int
-	state    PeerState
+	mu       sync.RWMutex  // lock
+	id       int           // unique id
+	addr     string        // humane addr
+	sockaddr unix.Sockaddr // sockaddr for send packet
+	weight   int           // selected ratio
+	state    PeerState     // define if peer is available
 }
 
 func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
@@ -44,7 +48,7 @@ func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
 func (p *Peer) Send(fd int, data []byte) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return unix.Sendto(fd, data, 0, p.sockaddr)
+	return sd_socket.SendTo(fd, data, 0, p.sockaddr)
 }
 
 func (p *Peer) SetState(state PeerState) {

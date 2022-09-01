@@ -31,7 +31,7 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 					if errno == unix.EAGAIN || errno == unix.EWOULDBLOCK {
 						logger.Debug("no packets to recv, should wait for recv event again")
 					} else {
-						logger.Errorf("recv packets failed: %w", os.NewSyscallError("recvmmsg", errno))
+						logger.Errorf("recv packets failed: %s", os.NewSyscallError("recvmmsg", errno).Error())
 					}
 					break
 				}
@@ -59,12 +59,12 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 
 						if !got {
 							logger.Debugf("init new session %p for packet", _sess)
+
 							s.fdHandles.Store(_sess.GetFD(), [2]func(){func() { _sess.GetCh() <- struct{}{} }, nil})
 							if err = s.selector.Add(_sess.GetFD(), sd_socket.SelectorEventRead); err != nil {
 								logger.Errorf("add selector for session failed: %w", err)
-								continue
-							} else {
 								s.fdHandles.Delete(_sess.GetFD())
+								continue
 							}
 							go s.downloadWorker(s.ctx, _sess)
 

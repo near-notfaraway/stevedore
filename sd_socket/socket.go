@@ -84,3 +84,20 @@ func SetSocketTimeout(fd, sTimeoutSec, rTimeoutSec int) error {
 
 	return nil
 }
+
+// Send data to specified addr through specified fd
+// Continue if EINTR, return data already send
+func SendTo(fd int, p []byte, flags int, to unix.Sockaddr) error {
+	for {
+		err := unix.Sendto(fd, p, flags, to)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return err
+		}
+
+		return nil
+	}
+
+}

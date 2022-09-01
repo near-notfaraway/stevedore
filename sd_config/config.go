@@ -51,6 +51,7 @@ type PeerConfig struct {
 	IP     string
 	Port   int
 	Weight int
+	Backup bool
 }
 
 type HealthCheckerConfig struct {

@@ -3,6 +3,7 @@ package sd_socket
 import (
 	"context"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"os"
 )
@@ -130,7 +131,7 @@ func (s *Epoller) Polling(ctx context.Context, handle func(evs []unix.EpollEvent
 		if n < 0 {
 			continue
 		}
-
+		logrus.Debug("evs is %v", s.evs[:n])
 		handle(s.evs[:n])
 	}
 }

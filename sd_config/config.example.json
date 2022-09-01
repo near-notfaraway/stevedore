@@ -50,7 +50,8 @@
           {
             "IP": "10.0.0.1",
             "Port": 2345,
-            "Weight": 1
+            "Weight": 1,
+            "Backup": true
           }
         ]
       }
