@@ -53,7 +53,7 @@ func (s *Server) uploadWorker(ctx context.Context, worker *UploadWorker) {
 						var got bool
 						_sess, got, err := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
 						if err != nil {
-							logger.Errorf("create session failed: %w,", err)
+							logger.Errorf("create session failed: %v", err)
 							continue
 						}
 
@@ -62,7 +62,7 @@ func (s *Server) uploadWorker(ctx context.Context, worker *UploadWorker) {
 
 							s.fdReadHandlers.Store(_sess.GetFD(), func() { _sess.GetCh() <- struct{}{} })
 							if err = s.selector.Add(_sess.GetFD(), sd_socket.SelectorEventRead); err != nil {
-								logger.Errorf("add selector for session failed: %w", err)
+								logger.Errorf("add selector for session failed: %v", err)
 								s.fdReadHandlers.Delete(_sess.GetFD())
 								continue
 							}

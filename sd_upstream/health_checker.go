@@ -35,10 +35,10 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 	for _, peer := range peers {
 		fd, err := sd_socket.UDPSocket(unix.AF_INET, false, false, false)
 		if err != nil {
-			logrus.Panic("init fd for health checker failed: %w", err)
+			logrus.Panicf("init fd for health checker failed: %v", err)
 		}
 		if err := unix.Connect(fd, peer.sockaddr); err != nil {
-			logrus.Error("connect upstream %s failed: %w", peer.addr)
+			logrus.Errorf("connect upstream %s failed: %v", peer.addr, err)
 		}
 		checkFds[peer.id] = fd
 	}

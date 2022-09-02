@@ -62,11 +62,11 @@ func (s *Session) GetCh() chan struct{} {
 
 func (s *Session) Close(selector sd_socket.Selector, evChanPool sync.Pool) {
 	if err := selector.Del(s.fd); err != nil {
-		logrus.Errorf("delete fd from selector failed; %w", err)
+		logrus.Errorf("delete fd from selector failed: %v", err)
 	}
 	s.cancel()
 	evChanPool.Put(s.ch)
 	if err := unix.Close(s.fd); err != nil {
-		logrus.Errorf("close fd failed; %w", err)
+		logrus.Errorf("close fd failed: %v", err)
 	}
 }

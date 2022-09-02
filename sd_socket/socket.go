@@ -71,14 +71,14 @@ func SetSocketTimeout(fd, sTimeoutSec, rTimeoutSec int) error {
 	if sTimeoutSec > 0 {
 		if err := syscall.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO,
 			&syscall.Timeval{Sec: int64(sTimeoutSec)}); err != nil {
-			return fmt.Errorf("set fd %s send timeout fail: %w", fd, err)
+			return fmt.Errorf("set fd %d send timeout fail: %w", fd, err)
 		}
 	}
 
 	if rTimeoutSec > 0 {
 		if err := syscall.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO,
 			&syscall.Timeval{Sec: int64(rTimeoutSec)}); err != nil {
-			return fmt.Errorf("set fd %s recv timeout fail: %w",  fd, err)
+			return fmt.Errorf("set fd %d recv timeout fail: %w",  fd, err)
 		}
 	}
 

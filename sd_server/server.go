@@ -35,7 +35,7 @@ type Server struct {
 func NewServer(config *sd_config.Config) *Server {
 	selector, err := sd_socket.NewEpoller(config.Server.EventSize, true)
 	if err != nil {
-		logrus.Panicf("create selector failed %w", err)
+		logrus.Panicf("create selector failed %v", err)
 	}
 
 	evChanPool := sync.Pool{

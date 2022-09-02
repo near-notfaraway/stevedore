@@ -46,7 +46,7 @@ func (s *Server) downloadWorker(ctx context.Context, sess *sd_session.Session) {
 					logger.Debugf("send packets to downstream")
 					err := sd_socket.SendTo(s.workers[0].fd, buf[:nr], 0, sess.GetSockaddr())
 					if err != nil {
-						logrus.Error("write to udp fail: %v", err)
+						logrus.Errorf("write to udp fail: %v", err)
 					}
 				}
 
