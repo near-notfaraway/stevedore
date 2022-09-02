@@ -3,7 +3,6 @@ package sd_socket
 import (
 	"context"
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"os"
 )
@@ -123,15 +122,20 @@ func (s *Epoller) Del(fd int) error {
 
 func (s *Epoller) Polling(ctx context.Context, handle func(evs []unix.EpollEvent)) error {
 	for {
-		n, err := unix.EpollWait(s.fd, s.evs, -1)
-		if err != nil && err != unix.EINTR {
-			return os.NewSyscallError("epoll_wait", err)
-		}
+		select {
+		case <-ctx.Done():
+			return nil
 
-		if n < 0 {
-			continue
+		default:
+			n, err := unix.EpollWait(s.fd, s.evs, -1)
+			if err != nil && err != unix.EINTR {
+				return os.NewSyscallError("epoll_wait", err)
+			}
+
+			if n < 0 {
+				continue
+			}
+			handle(s.evs[:n])
 		}
-		logrus.Debug("evs is %v", s.evs[:n])
-		handle(s.evs[:n])
 	}
 }

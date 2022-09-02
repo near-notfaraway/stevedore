@@ -13,28 +13,23 @@ import (
 	"sync"
 )
 
-const (
-	FdHandlerIndexIn = iota
-	FdHandlerIndexOut
-)
-
-type WorkerIns struct {
+type UploadWorker struct {
 	id int           // unique worker id
 	fd int           // fd of listened socket
 	ch chan struct{} // channel for recv upload event
 }
 
 type Server struct {
-	config      *sd_config.Config
-	ctx         context.Context
-	workers     []*WorkerIns
-	taskPool    sd_util.TaskPool
-	selector    sd_socket.Selector
-	fdHandles   sync.Map // map[int][2]func()
-	sessionMgr  *sd_session.Manager
-	upstreamMgr *sd_upstream.Manager
-	mcPool      *sd_socket.MMsgContainerPool
-	evChanPool  sync.Pool
+	config         *sd_config.Config            // global config
+	ctx            context.Context              // control context
+	workers        []*UploadWorker              // upload workers
+	taskPool       sd_util.TaskPool             // task pool for deliver events
+	selector       sd_socket.Selector           // poll events from fds
+	fdReadHandlers sync.Map                     // map[int]func(): map fd and its read event handler
+	sessionMgr     *sd_session.Manager          // manage sessions
+	upstreamMgr    *sd_upstream.Manager         // manage upstreams
+	mcPool         *sd_socket.MMsgContainerPool // allocate memory for recvmmsg
+	evChanPool     sync.Pool                    // allocate memory for event channel
 }
 
 func NewServer(config *sd_config.Config) *Server {
@@ -51,7 +46,7 @@ func NewServer(config *sd_config.Config) *Server {
 
 	return &Server{
 		config:      config,
-		workers:     make([]*WorkerIns, 0, config.Server.ListenParallel),
+		workers:     make([]*UploadWorker, 0, config.Server.ListenParallel),
 		taskPool:    sd_util.NewSimpleTaskPool(config.Server.TaskPoolSize, config.Server.TaskPoolTimeoutSec),
 		selector:    selector,
 		sessionMgr:  sd_session.NewManager(config.Session, evChanPool, selector),
@@ -81,13 +76,13 @@ func (s *Server) ListenAndServe() error {
 		}
 
 		logrus.Debugf("store fd %d", fd)
-		s.fdHandles.Store(fd, [2]func(){func() { ch <- struct{}{} }, nil})
+		s.fdReadHandlers.Store(fd, func() { ch <- struct{}{} })
 		if err = s.selector.Add(fd, sd_socket.SelectorEventRead); err != nil {
-			s.fdHandles.Delete(fd)
+			s.fdReadHandlers.Delete(fd)
 			return fmt.Errorf("add listen conn to selector failed: %w", err)
 		}
 
-		worker := &WorkerIns{id: i, fd: fd, ch: ch}
+		worker := &UploadWorker{id: i, fd: fd, ch: ch}
 		s.workers = append(s.workers, worker)
 		go s.uploadWorker(ctx, worker)
 	}
@@ -105,19 +100,15 @@ func (s *Server) ListenAndServe() error {
 	logrus.Debug("start polling...")
 	return s.selector.Polling(ctx, func(evs []unix.EpollEvent) {
 		for i := 0; i < len(evs); i++ {
-			fs, ok := s.fdHandles.Load(int(evs[i].Fd))
+			fs, ok := s.fdReadHandlers.Load(int(evs[i].Fd))
 			if !ok {
 				continue
 			}
-			_fs := fs.([2]func())
+			_fs := fs.(func())
 
 			// do read event
 			if (evs[i].Events & unix.EPOLLIN) > 0 {
-				s.taskPool.Go(_fs[FdHandlerIndexIn])
-			}
-			// do write event
-			if (evs[i].Events & unix.EPOLLOUT) > 0 {
-				s.taskPool.Go(_fs[FdHandlerIndexOut])
+				s.taskPool.Go(_fs)
 			}
 		}
 	})

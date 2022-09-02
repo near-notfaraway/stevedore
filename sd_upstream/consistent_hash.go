@@ -88,7 +88,7 @@ func (c *ConsistentHash) UpdateLookupTable(peers []*Peer, init bool) error {
 		}
 	}
 
-	// clean lookup table if init
+	// clean lookup table if not init
 	if !init {
 		c.lookupTable = make([]*Peer, LookupTableSize)
 	}

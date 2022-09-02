@@ -33,6 +33,12 @@
         "Operator": "==",
         "Value": "0x69",
         "Upstream": "default"
+      },
+      {
+        "KeyBytes": "1:4",
+        "Operator": "==",
+        "Value": "0x998877",
+        "Upstream": "deny"
       }
     ],
     "Upstreams": [
@@ -52,6 +58,12 @@
             "Port": 2345,
             "Weight": 1,
             "Backup": true
+          },
+          {
+            "IP": "10.0.0.2",
+            "Port": 2345,
+            "Weight": 1,
+            "Backup": false
           }
         ]
       }

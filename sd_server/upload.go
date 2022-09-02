@@ -9,10 +9,10 @@ import (
 	"os"
 )
 
-func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
+func (s *Server) uploadWorker(ctx context.Context, worker *UploadWorker) {
 	// init logger for upload worker
-	logger := logrus.WithField("work_id", ins.id)
-	logger.Debug("init worker")
+	logger := logrus.WithField("work_id", worker.id)
+	logger.Debug("init upload worker")
 	mc := s.mcPool.GetMMsgContainerFromPool()
 	defer s.mcPool.PutMMsgContainerToPool(mc)
 
@@ -22,11 +22,11 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 		case <-ctx.Done():
 			return
 
-		case <-ins.ch:
+		case <-worker.ch:
 			logger.Debug("a read event came in, continue batch recv packets")
 			for {
 				logger.Debug("do batch recv packets")
-				nPkt, errno := sd_socket.RecvMMsg(ins.fd, mc)
+				nPkt, errno := sd_socket.RecvMMsg(worker.fd, mc)
 				if nPkt < 1 || errno != 0 {
 					if errno == unix.EAGAIN || errno == unix.EWOULDBLOCK {
 						logger.Debug("no packets to recv, should wait for recv event again")
@@ -60,13 +60,13 @@ func (s *Server) uploadWorker(ctx context.Context, ins *WorkerIns) {
 						if !got {
 							logger.Debugf("init new session %p for packet", _sess)
 
-							s.fdHandles.Store(_sess.GetFD(), [2]func(){func() { _sess.GetCh() <- struct{}{} }, nil})
+							s.fdReadHandlers.Store(_sess.GetFD(), func() { _sess.GetCh() <- struct{}{} })
 							if err = s.selector.Add(_sess.GetFD(), sd_socket.SelectorEventRead); err != nil {
 								logger.Errorf("add selector for session failed: %w", err)
-								s.fdHandles.Delete(_sess.GetFD())
+								s.fdReadHandlers.Delete(_sess.GetFD())
 								continue
 							}
-							go s.downloadWorker(s.ctx, _sess)
+							go s.downloadWorker(_sess.GetCtx(), _sess)
 
 						} else {
 							logger.Debugf("session %p for packet is existed", _sess)

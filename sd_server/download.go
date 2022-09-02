@@ -10,7 +10,9 @@ import (
 )
 
 func (s *Server) downloadWorker(ctx context.Context, sess *sd_session.Session) {
+	// init logger for download worker
 	logger := logrus.WithField("session_name", sess.GetName())
+	logger.Debug("init download worker")
 	mc := s.mcPool.GetMMsgContainerFromPool()
 	defer s.mcPool.PutMMsgContainerToPool(mc)
 

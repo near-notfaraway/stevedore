@@ -38,9 +38,7 @@ func (m *Manager) sessionRecycle() {
 			// delete expired session
 			if time.Now().Unix()-sess.LastActive() > m.timeoutSec {
 				m.sessions.Delete(key)
-				_ = m.selector.Del(sess.fd)
-				_ = unix.Close(sess.fd)
-				m.evChanPool.Put(sess.ch)
+				sess.Close(m.selector, m.evChanPool)
 			}
 			return true
 		})
