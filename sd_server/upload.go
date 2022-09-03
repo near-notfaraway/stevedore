@@ -98,6 +98,7 @@ func (s *Server) uploadWorker(ctx context.Context, worker *UploadWorker) {
 							logrus.Warnf("upload to peer %s succeed", peer.GetAddr())
 							if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
 								peer.SetState(sd_upstream.PeerDead)
+								upstream.ResetPeers()
 							}
 							continue
 						}

@@ -10,6 +10,7 @@ import (
 
 type Upstream interface {
 	SelectPeer(data []byte) *Peer
+	ResetPeers()
 }
 
 //------------------------------------------------------------------------------
@@ -21,6 +22,10 @@ type RRUpstream struct {
 
 func (u *RRUpstream) SelectPeer(data []byte) *Peer {
 	return nil
+}
+
+func (u *RRUpstream) ResetPeers() {
+
 }
 
 //------------------------------------------------------------------------------
@@ -98,8 +103,7 @@ func NewCHashUpstream(config *sd_config.UpstreamConfig) Upstream {
 		for {
 			select {
 			case <-changedCh:
-				logrus.Debugf("rehash because a peer state changed")
-				upstream.rehash()
+				upstream.ResetPeers()
 			}
 		}
 	}()
@@ -117,7 +121,9 @@ func (u *CHashUpstream) SelectPeer(data []byte) *Peer {
 	return u.cHash.SelectPeer(data[u.keyStart:u.keyEnd])
 }
 
-func (u *CHashUpstream) rehash() {
+func (u *CHashUpstream) ResetPeers() {
+	logrus.Debugf("rehash because a peer state changed")
+
 	// get healthy peers
 	num := 0
 	for _, peer := range u.peers {
