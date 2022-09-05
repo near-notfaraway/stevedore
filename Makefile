@@ -1,4 +1,4 @@
-.PHONY: all build clean run check cover lint docker help
+.PHONY: all prepare build package clean test help
 
 WORK_DIR=./output
 OUTPUT_DIR=${WORK_DIR}/stevedore
@@ -25,4 +25,17 @@ clean:
 	@if [ -d ${WORK_DIR} ]; then rm -rf ${WORK_DIR}; fi
 
 test:
-	go test -v -cover ./sd_util
+	go test -v -cover ./sd_utilR
+
+help:
+	@echo "Usage:"
+	@echo "    make [child command]\n"
+	@echo "All child command are as follows:"
+	@echo "    make:           The same as make all"
+	@echo "    make all:       Run make test -> make prepare -> make build -> make package"
+	@echo "    make prepare:   Remake the work directory named 'output'"
+	@echo "    make build:     Compile all codes and output the binary file 'stevedore'"
+	@echo "    make package:   Pack all files and output the compressed file 'stevedore.tgz'"
+	@echo "    make clean:     Remove the work directory named 'output'"
+	@echo "    make test:      Run all unit test of the project"
+	@echo "    make help:      Show help\n"
