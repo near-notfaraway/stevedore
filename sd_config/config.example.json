@@ -26,7 +26,7 @@
     "TimeoutSec": 30
   },
   "Upload": {
-    "DefaultUpstream": "default",
+    "DefaultUpstream": "deny",
     "Routes": [
       {
         "KeyBytes": "0:1",
@@ -38,7 +38,7 @@
         "KeyBytes": "1:4",
         "Operator": "==",
         "Value": "0x998877",
-        "Upstream": "deny"
+        "Upstream": "rr_sample"
       }
     ],
     "Upstreams": [
@@ -61,6 +61,30 @@
           },
           {
             "IP": "10.0.0.2",
+            "Port": 2345,
+            "Weight": 1,
+            "Backup": false
+          }
+        ]
+      },
+      {
+        "Name": "rr_sample",
+        "Type": "rr",
+        "HealthChecker": {
+          "HeartbeatIntervalSec": 5,
+          "HeartbeatTimeoutSec": 3,
+          "SuccessTimes": 1,
+          "FailedTimes": 1
+        },
+        "Peers": [
+          {
+            "IP": "10.0.0.3",
+            "Port": 2345,
+            "Weight": 1,
+            "Backup": true
+          },
+          {
+            "IP": "10.0.0.4",
             "Port": 2345,
             "Weight": 1,
             "Backup": false

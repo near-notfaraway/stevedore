@@ -19,7 +19,7 @@ func NewManager(config *sd_config.UploadConfig) *Manager {
 	// init upstreams
 	upstreams := make(map[string]Upstream)
 	for _, upsConfig := range config.Upstreams {
-		upstreams[upsConfig.Name] = NewCHashUpstream(upsConfig)
+		upstreams[upsConfig.Name] = NewUpstream(upsConfig)
 	}
 
 	// init default upstream
