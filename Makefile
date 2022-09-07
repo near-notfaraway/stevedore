@@ -25,7 +25,7 @@ clean:
 	@if [ -d ${WORK_DIR} ]; then rm -rf ${WORK_DIR}; fi
 
 test:
-	go test -v -cover ./sd_utilR
+	go test -v -cover ./sd_util
 
 help:
 	@echo "Usage:"

@@ -10,9 +10,9 @@ func StringToBytes(s string) ([]byte, error) {
 		return hexStringToBytes(s[2:])
 	case "0b":
 		return bitStringToBytes(s[2:])
+	default:
+		return []byte(s), nil
 	}
-
-	return nil, fmt.Errorf("invalid string %s", s)
 }
 
 // Converts a hex string into byte slice and a error
