@@ -1,4 +1,8 @@
 {
+  "Common": {
+    "WorkingDir": "",
+    "PidFile": ""
+  },
   "PProf": {
     "Open": true,
     "ServerAddr": ":6060"

@@ -1,11 +1,17 @@
 package sd_config
 
 type Config struct {
+	Common  *CommonConfig
 	PProf   *PProfConfig
 	Log     *LogConfig
 	Server  *ServerConfig
 	Upload  *UploadConfig
 	Session *SessionConfig
+}
+
+type CommonConfig struct {
+	WorkingDir string // working dir
+	PidPath    string // pid file
 }
 
 type PProfConfig struct {
