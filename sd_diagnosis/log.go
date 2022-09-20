@@ -1,4 +1,4 @@
-package sd_util
+package sd_diagnosis
 
 import (
 	"fmt"

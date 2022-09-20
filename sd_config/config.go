@@ -1,5 +1,12 @@
 package sd_config
 
+import (
+	"fmt"
+	"github.com/sirupsen/logrus"
+	"os"
+	"path/filepath"
+)
+
 type Config struct {
 	Common  *CommonConfig
 	PProf   *PProfConfig
@@ -77,4 +84,28 @@ type RouteConfig struct {
 type SessionConfig struct {
 	RecycleIntervalSec int64 // time interval of recycle session
 	TimeoutSec         int64 // timeout for recycle session
+}
+
+var GlobalConfig = new(Config)
+
+func (c *Config) TestAndComplete() error {
+	// use project dir for default
+	if c.Common.WorkingDir == "" {
+		execPath, err := filepath.Abs(os.Args[0])
+		if err != nil {
+			logrus.Fatalf("get exec path failed: %s", err)
+		}
+		c.Common.WorkingDir = filepath.Dir(filepath.Dir(execPath))
+	}
+
+	// use exec dir default
+	if c.Common.PidPath == "" {
+		execPath, err := filepath.Abs(os.Args[0])
+		if err != nil {
+			return fmt.Errorf("get exec path failed: %s", err)
+		}
+		c.Common.PidPath = filepath.Join(filepath.Dir(execPath), "stevedore.pid")
+	}
+
+	return nil
 }

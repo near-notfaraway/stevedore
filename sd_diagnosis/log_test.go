@@ -1,4 +1,4 @@
-package sd_util
+package sd_diagnosis
 
 import (
 	"github.com/near-notfaraway/stevedore/sd_config"
