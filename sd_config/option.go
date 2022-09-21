@@ -162,7 +162,7 @@ func (o *Option) handleDaemonOpt() {
 			os.Exit(1)
 		}
 
-		fmt.Printf("stevedore[%d] daemon running...\n", cmd.Process.Pid)
+		fmt.Printf("start stevedore[%d] daemon\n", cmd.Process.Pid)
 		os.Exit(0)
 	}
 }

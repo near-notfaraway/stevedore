@@ -29,11 +29,15 @@ func main() {
 		panic(fmt.Errorf("init logger failed: %w", err))
 	}
 
+	// confirm no pid file
+	if pid, err := sd_util.GetPid(config.Common.PidPath); err != nil {
+		panic(fmt.Errorf("get pid failed: %w", err))
+	} else if pid != -1 {
+		logrus.Fatalf("pid exist, stevedore[%d] already running", pid)
+	}
+
 	// save pid if as a daemon
 	if opt.Daemon {
-		if pid, _ := sd_util.GetPid(config.Common.PidPath); pid != -1 {
-			panic("stevedore is not running")
-		}
 		if err := sd_util.SavePid(config.Common.PidPath); err != nil {
 			panic(fmt.Errorf("save pid failed: %w", err))
 		}
