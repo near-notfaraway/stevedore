@@ -2,10 +2,11 @@ package sd_config
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"os"
 	"path/filepath"
 )
+
+var GlobalConfig = new(Config)
 
 type Config struct {
 	Common  *CommonConfig
@@ -16,14 +17,42 @@ type Config struct {
 	Session *SessionConfig
 }
 
+// test common config before option handle finished
+func (c *Config) TestCommon() error {
+	// use project dir for default
+	if c.Common.WorkingDir == "" {
+		execPath, err := filepath.Abs(os.Args[0])
+		if err != nil {
+			return fmt.Errorf("get exec path failed: %s", err)
+		}
+		c.Common.WorkingDir = filepath.Dir(filepath.Dir(execPath))
+	}
+
+	// use exec dir default
+	if c.Common.PidPath == "" {
+		execPath, err := filepath.Abs(os.Args[0])
+		if err != nil {
+			return fmt.Errorf("get exec path failed: %s", err)
+		}
+		c.Common.PidPath = filepath.Join(filepath.Dir(execPath), "stevedore.pid")
+	}
+
+	return nil
+}
+
+// test all config before listen and serve
+func (c *Config) TestCompletely() error {
+	return nil
+}
+
 type CommonConfig struct {
 	WorkingDir string // working dir
 	PidPath    string // pid file
 }
 
 type PProfConfig struct {
-	Open       bool
-	ServerAddr string
+	Open       bool   // if open pprof
+	ServerAddr string // pprof server addr
 }
 
 type LogConfig struct {
@@ -84,28 +113,4 @@ type RouteConfig struct {
 type SessionConfig struct {
 	RecycleIntervalSec int64 // time interval of recycle session
 	TimeoutSec         int64 // timeout for recycle session
-}
-
-var GlobalConfig = new(Config)
-
-func (c *Config) TestAndComplete() error {
-	// use project dir for default
-	if c.Common.WorkingDir == "" {
-		execPath, err := filepath.Abs(os.Args[0])
-		if err != nil {
-			logrus.Fatalf("get exec path failed: %s", err)
-		}
-		c.Common.WorkingDir = filepath.Dir(filepath.Dir(execPath))
-	}
-
-	// use exec dir default
-	if c.Common.PidPath == "" {
-		execPath, err := filepath.Abs(os.Args[0])
-		if err != nil {
-			return fmt.Errorf("get exec path failed: %s", err)
-		}
-		c.Common.PidPath = filepath.Join(filepath.Dir(execPath), "stevedore.pid")
-	}
-
-	return nil
 }

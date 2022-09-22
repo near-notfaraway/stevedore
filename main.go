@@ -19,11 +19,11 @@ func main() {
 
 	// test config
 	config := sd_config.GlobalConfig
-	if err := config.TestAndComplete(); err != nil {
+	if err := config.TestCompletely(); err != nil {
 		panic(fmt.Errorf("test config failed: %w", err))
 	}
 
-	// init logger
+	// cwd and init logger
 	cwd(config.Common.WorkingDir)
 	if err := sd_diagnosis.InitLogger(config.Log); err != nil {
 		panic(fmt.Errorf("init logger failed: %w", err))

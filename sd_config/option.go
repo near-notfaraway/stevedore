@@ -16,10 +16,11 @@ const (
 )
 
 type Option struct {
-	Config  string
-	Daemon  bool
-	Signal  string
-	Version bool
+	Config  string // -c or --config opt
+	Test    bool   // -t or --test opt
+	Daemon  bool   // -d or --daemon opt
+	Signal  string // -s or --signal opt
+	Version bool   // -v or --version
 }
 
 func ParseOption() *Option {
@@ -31,6 +32,9 @@ func ParseOption() *Option {
 
 	flag.StringVar(&opt.Config, "c", "./stevedore.config.json", "Path to config file")
 	flag.StringVar(&opt.Config, "config", "./stevedore.config.json", "Path to config file")
+
+	flag.BoolVar(&opt.Test, "t", false, "Test config file")
+	flag.BoolVar(&opt.Test, "test", false, "Test config file")
 
 	flag.StringVar(&opt.Signal, "s", "", "Send signal to the process")
 	flag.StringVar(&opt.Signal, "signal", "", "Send signal to the process")
@@ -45,6 +49,7 @@ func ParseOption() *Option {
 func (o *Option) Handle() {
 	o.handleVersionOpt()
 	o.handleConfigOpt()
+	o.handleTestOpt()
 	o.handleSignalOpt()
 	o.handleDaemonOpt()
 }
@@ -64,9 +69,21 @@ func (o *Option) handleConfigOpt() {
 		}
 	}
 
-	if err := GlobalConfig.TestAndComplete(); err != nil {
-		fmt.Printf("test config failed: %s", err)
+	if err := GlobalConfig.TestCommon(); err != nil {
+		fmt.Printf("test common config failed: %s", err)
 		os.Exit(1)
+	}
+}
+
+func (o *Option) handleTestOpt() {
+	if o.Test {
+		if err := GlobalConfig.TestCompletely(); err != nil {
+			fmt.Printf("test all config failed: %s", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("test all config succeed\n")
+		os.Exit(0)
 	}
 }
 
@@ -169,11 +186,12 @@ func (o *Option) handleDaemonOpt() {
 
 func showUsage() {
 	fmt.Printf(`Usage:
-    stevedore [options...] [-c <file>] [-s <signal>]	
+    stevedore [options...] [-htdv] [-c <file>] [-s <signal>]	
 
 Options:
     -h/--help               Show help
     -c/--config <file>      Path to config file
+    -t/--test               Test config file
     -d/--daemon             Running as a daemon
     -s/--signal <sig>       Send signal to the process
                             The argument signal can be one of follows:
