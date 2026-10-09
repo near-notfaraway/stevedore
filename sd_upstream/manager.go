@@ -1,57 +1,57 @@
 package sd_upstream
 
-import (
-	"github.com/near-notfaraway/stevedore/sd_config"
-)
+import "github.com/near-notfaraway/stevedore/sd_config"
 
-//------------------------------------------------------------------------------
-// Manager: Used to manager routes and upstreams
-// - choose upstream according to matched route
-//------------------------------------------------------------------------------
-
-type Manager struct {
-	defaultUpstream Upstream            // use it when no route match
-	upstreams       map[string]Upstream // manage upstreams which decide how to choose peer
-	routes          []*Route            // manage routes which  decide how to choose upstream
+type Registry struct {
+	configs         []*sd_config.UpstreamConfig // immutable upstream definitions
+	groups          map[string]*PeerGroup       // shared peer control planes
+	defaultUpstream string                      // default upstream name
+	routes          []*Route                    // immutable ordered routes
 }
 
-func NewManager(config *sd_config.UploadConfig) *Manager {
-	// init upstreams
-	upstreams := make(map[string]Upstream)
-	for _, upsConfig := range config.Upstreams {
-		upstreams[upsConfig.Name] = NewUpstream(upsConfig)
+func NewRegistry(config *sd_config.UploadConfig) *Registry {
+	groups := make(map[string]*PeerGroup, len(config.Upstreams))
+	for _, upstreamConfig := range config.Upstreams {
+		groups[upstreamConfig.Name] = NewPeerGroup(upstreamConfig)
 	}
 
-	// init default upstream
-	defaultUpstream, ok := upstreams[config.DefaultUpstream]
-	if !ok {
-		defaultUpstream = nil
-	}
-
-	// init routes
 	routes := make([]*Route, 0, len(config.Routes))
 	for id, routeConfig := range config.Routes {
-		route := NewRoute(id, routeConfig)
-		routes = append(routes, route)
+		routes = append(routes, NewRoute(id, routeConfig))
 	}
-
-	return &Manager{
-		defaultUpstream: defaultUpstream,
-		upstreams:       upstreams,
+	return &Registry{
+		configs:         config.Upstreams,
+		groups:          groups,
+		defaultUpstream: config.DefaultUpstream,
 		routes:          routes,
 	}
 }
 
+func (r *Registry) NewManager() *Manager {
+	upstreams := make(map[string]Upstream, len(r.configs))
+	for _, config := range r.configs {
+		upstreams[config.Name] = NewUpstream(config, r.groups[config.Name])
+	}
+	return &Manager{
+		defaultUpstream: upstreams[r.defaultUpstream],
+		upstreams:       upstreams,
+		routes:          r.routes,
+	}
+}
+
+type Manager struct {
+	defaultUpstream Upstream            // used when no route matches
+	upstreams       map[string]Upstream // reactor-local upstream selectors
+	routes          []*Route            // immutable ordered routes
+}
+
 func (m *Manager) RouteUpstream(data []byte) Upstream {
-	// iterate over all routes in order
 	for _, route := range m.routes {
 		if route.Match(data) {
-			if v, ok := m.upstreams[route.upstream]; ok {
-				return v
+			if upstream, ok := m.upstreams[route.upstream]; ok {
+				return upstream
 			}
 		}
 	}
-
-	// use default upstream when not match
 	return m.defaultUpstream
 }

@@ -14,11 +14,9 @@
     "ListenAddr": "0.0.0.0:2614",
     "ListenParallel": 4,
     "EventSize": 1024,
-    "EventChanSize": 1024,
     "BatchSize": 32,
     "BufSize": 4096,
-    "TaskPoolSize": 64,
-    "TaskPoolTimeoutSec": 10,
+    "MaxRecvBatchesPerFD": 8,
     "MaxTryTimes": 3
   },
   "Session": {

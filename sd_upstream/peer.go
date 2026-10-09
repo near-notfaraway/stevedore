@@ -2,13 +2,14 @@ package sd_upstream
 
 import (
 	"fmt"
+	"sync/atomic"
+
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"golang.org/x/sys/unix"
-	"sync"
 )
 
-type PeerState int
+type PeerState int32
 
 const (
 	_ PeerState = iota
@@ -22,12 +23,11 @@ const (
 //------------------------------------------------------------------------------
 
 type Peer struct {
-	mu       sync.RWMutex  // lock
 	id       int           // unique id
 	addr     string        // humane addr
 	sockaddr unix.Sockaddr // sockaddr for send packet
 	weight   int           // selected ratio
-	state    PeerState     // define if peer is available
+	state    int32         // atomic PeerState
 }
 
 func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
@@ -41,26 +41,20 @@ func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
 		addr:     addr,
 		sockaddr: sockaddr,
 		weight:   config.Weight,
-		state:    PeerAlive,
+		state:    int32(PeerAlive),
 	}
 }
 
 func (p *Peer) Send(fd int, data []byte) error {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	return sd_socket.SendTo(fd, data, 0, p.sockaddr)
 }
 
 func (p *Peer) SetState(state PeerState) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.state = state
+	atomic.StoreInt32(&p.state, int32(state))
 }
 
 func (p *Peer) isAlive() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.state == PeerAlive
+	return PeerState(atomic.LoadInt32(&p.state)) == PeerAlive
 }
 
 func (p *Peer) GetAddr() string {

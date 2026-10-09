@@ -2,11 +2,11 @@ package sd_upstream
 
 import (
 	"fmt"
-	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/sirupsen/logrus"
 	"strconv"
 	"strings"
-	"sync/atomic"
+
+	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -16,136 +16,103 @@ const (
 
 type Upstream interface {
 	SelectPeer(data []byte) *Peer
-	ResetPeers()
+	MarkPeerDead(peer *Peer)
 }
 
-func NewUpstream(config *sd_config.UpstreamConfig) Upstream {
+func NewUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) Upstream {
 	switch config.Type {
 	case UpstreamTypeRR:
-		return NewRRUpstream(config)
-
+		return NewRRUpstream(group)
 	case UpstreamTypeCHash:
-		return NewCHashUpstream(config)
-
+		return NewCHashUpstream(config, group)
 	default:
 		panic(fmt.Errorf("invalid upstream type: %s", config.Type))
 	}
 }
 
-// Init Peers in Upstream, avoid duplication peers and extract backup peer
-// Return peer slice and backup peer
 func InitUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup *Peer) {
 	peers = make([]*Peer, 0, len(config.Peers))
 	uniqueMap := make(map[string]struct{})
 
 	for id, peerConfig := range config.Peers {
-		// check upstream addr duplication
+		if peerConfig.Weight < 1 {
+			logrus.Panicf("peer %s:%d has invalid weight %d in upstream %s",
+				peerConfig.IP, peerConfig.Port, peerConfig.Weight, config.Name)
+		}
 		peerAddr := fmt.Sprintf("%s:%d", peerConfig.IP, peerConfig.Port)
 		if _, dup := uniqueMap[peerAddr]; dup {
 			logrus.Panicf("duplicated peer %s in upstream %s", peerAddr, config.Name)
 		}
 		uniqueMap[peerAddr] = struct{}{}
 
-		// create peer
 		peer := NewPeer(id, peerAddr, peerConfig)
 		peers = append(peers, peer)
-
-		// set backup
 		if peerConfig.Backup {
-			if backup == nil {
-				backup = peer
-			} else {
+			if backup != nil {
 				logrus.Panicf("two peer %s and %s is backup", backup.addr, peer.addr)
 			}
+			backup = peer
 		}
 	}
 	return
 }
 
-//------------------------------------------------------------------------------
-// RRUpstream: Used to select peer through round-robin
-//------------------------------------------------------------------------------
-
 const MaxUint64 = 18446744073709551615
 
 type RRUpstream struct {
-	name          string         // unique name
-	peers         []*Peer        // all peers
-	healthyPeers  []*Peer        // healthy peers slice
-	backup        *Peer          // backup peer
-	healthChecker *HealthChecker // health checker
-	rrList        []*Peer        // round robin peers list
-	cur           uint64         // mod it for get peer
+	group           *PeerGroup // shared peer control plane
+	snapshotVersion uint64     // version used to build rrList
+	rrList          []*Peer    // reactor-local weighted round-robin list
+	cur             uint64     // reactor-local selection cursor
 }
 
-func NewRRUpstream(config *sd_config.UpstreamConfig) *RRUpstream {
-	// init upstream
-	peers, backup := InitUpstreamPeers(config)
+func NewRRUpstream(group *PeerGroup) *RRUpstream {
 	ups := &RRUpstream{
-		name:          config.Name,
-		peers:         peers,
-		healthyPeers:  make([]*Peer, len(peers)),
-		backup:        backup,
-		healthChecker: NewHealthChecker(config.HealthChecker, peers),
-		cur:           MaxUint64,
+		group: group,
+		cur:   MaxUint64,
 	}
-
-	// init rrList and start health check
-	ups.rrList = ups.buildRRList(peers)
-	changedCh := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-changedCh:
-				ups.ResetPeers()
-			}
-		}
-	}()
-	go ups.healthChecker.Check(changedCh)
-
+	ups.syncSnapshot()
 	return ups
 }
 
-func (u *RRUpstream) SelectPeer(data []byte) *Peer {
-	cur := atomic.AddUint64(&u.cur, 1)
-	if cur == MaxUint64 {
-		// avoid max uint64 and 0, mod someone is 0
-		cur = atomic.AddUint64(&u.cur, 1)
+func (u *RRUpstream) SelectPeer(_ []byte) *Peer {
+	u.syncSnapshot()
+	if len(u.rrList) == 0 {
+		return nil
 	}
-	return u.rrList[cur%uint64(len(u.rrList))]
+	u.cur++
+	if u.cur == MaxUint64 {
+		u.cur++
+	}
+	return u.rrList[u.cur%uint64(len(u.rrList))]
 }
 
-func (u *RRUpstream) ResetPeers() {
-	// get healthy peers
-	num := 0
-	for _, peer := range u.peers {
-		if peer.isAlive() {
-			u.healthyPeers[num] = peer
-			num += 1
-		}
-	}
-
-	// set backup
-	if num == 0 {
-		logrus.Error("use backup peer because of all peers dead")
-		u.backup.SetState(PeerTemp)
-		u.healthyPeers[num] = u.backup
-		num += 1
-	}
-
-	// update lookup table
-	logrus.Debugf("rehash because a peer state changed")
-	u.rrList = u.buildRRList(u.healthyPeers[:num])
+func (u *RRUpstream) MarkPeerDead(peer *Peer) {
+	u.group.MarkDead(peer)
 }
 
-func (u *RRUpstream) buildRRList(peers []*Peer) []*Peer {
+func (u *RRUpstream) syncSnapshot() {
+	snapshot := u.group.Snapshot()
+	if snapshot.Version == u.snapshotVersion {
+		return
+	}
+	u.rrList = buildRRList(snapshot.Peers)
+	u.snapshotVersion = snapshot.Version
+}
+
+func buildRRList(peers []*Peer) []*Peer {
 	sumWeight := 0
 	maxWeight := 0
 	for _, peer := range peers {
 		if peer.weight > maxWeight {
 			maxWeight = peer.weight
 		}
-		sumWeight += peer.weight
+		if peer.weight > 0 {
+			sumWeight += peer.weight
+		}
+	}
+	if sumWeight == 0 || maxWeight == 0 {
+		return nil
 	}
 
 	idx := 0
@@ -158,27 +125,22 @@ func (u *RRUpstream) buildRRList(peers []*Peer) []*Peer {
 			}
 		}
 	}
-
 	return rrList
 }
 
-//------------------------------------------------------------------------------
-// CHashUpstream: Used to select peer through consistent hash
-//------------------------------------------------------------------------------
 type CHashUpstream struct {
-	name          string          // unique name
-	peers         []*Peer         // all peers
-	healthyPeers  []*Peer         // healthy peers slice
-	backup        *Peer           // backup peer
-	cHash         *ConsistentHash // chash instant
-	keyStart      int             // start index used to extract key
-	keyEnd        int             // end index used to extract key
-	healthChecker *HealthChecker  // health checker
+	group           *PeerGroup      // shared peer control plane
+	snapshotVersion uint64          // version used to build cHash
+	cHash           *ConsistentHash // reactor-local lookup table
+	keyStart        int             // start index used to extract key
+	keyEnd          int             // end index used to extract key
 }
 
-func NewCHashUpstream(config *sd_config.UpstreamConfig) *CHashUpstream {
-	// init key start and key end
+func NewCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *CHashUpstream {
 	keyIdx := strings.Split(config.KeyBytes, ":")
+	if len(keyIdx) != 2 {
+		logrus.Panicf("key bytes %s is invalid in upstream %s", config.KeyBytes, config.Name)
+	}
 	keyStart, err := strconv.Atoi(keyIdx[0])
 	if err != nil {
 		logrus.Panicf("key start %s is invalid in upstream %s", keyIdx[0], config.Name)
@@ -191,65 +153,33 @@ func NewCHashUpstream(config *sd_config.UpstreamConfig) *CHashUpstream {
 		logrus.Panicf("key start %s >= key end %s in upstream %s", keyIdx[0], keyIdx[1], config.Name)
 	}
 
-	// init peers and chash, build upstream
-	peers, backup := InitUpstreamPeers(config)
-	cHash := NewConsistentHash(peers)
 	ups := &CHashUpstream{
-		name:          config.Name,
-		peers:         peers,
-		healthyPeers:  make([]*Peer, len(peers)),
-		backup:        backup,
-		cHash:         cHash,
-		keyStart:      keyStart,
-		keyEnd:        keyEnd,
-		healthChecker: NewHealthChecker(config.HealthChecker, peers),
+		group:    group,
+		cHash:    NewConsistentHash(nil),
+		keyStart: keyStart,
+		keyEnd:   keyEnd,
 	}
-
-	// start health check
-	changedCh := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-changedCh:
-				ups.ResetPeers()
-			}
-		}
-	}()
-	go ups.healthChecker.Check(changedCh)
-
+	ups.syncSnapshot()
 	return ups
 }
 
 func (u *CHashUpstream) SelectPeer(data []byte) *Peer {
-	// data too short
 	if len(data) < u.keyEnd {
 		return nil
 	}
-
+	u.syncSnapshot()
 	return u.cHash.SelectPeer(data[u.keyStart:u.keyEnd])
 }
 
-func (u *CHashUpstream) ResetPeers() {
-	// get healthy peers
-	num := 0
-	for _, peer := range u.peers {
-		if peer.isAlive() {
-			u.healthyPeers[num] = peer
-			num += 1
-		}
-	}
+func (u *CHashUpstream) MarkPeerDead(peer *Peer) {
+	u.group.MarkDead(peer)
+}
 
-	// set backup
-	if num == 0 {
-		logrus.Error("use backup peer because of all peers dead")
-		u.backup.SetState(PeerTemp)
-		u.healthyPeers[num] = u.backup
-		num += 1
+func (u *CHashUpstream) syncSnapshot() {
+	snapshot := u.group.Snapshot()
+	if snapshot.Version == u.snapshotVersion {
+		return
 	}
-
-	// update lookup table
-	logrus.Debugf("rehash because a peer state changed")
-	if err := u.cHash.UpdateLookupTable(u.healthyPeers[:num], false); err != nil {
-		logrus.Errorf("rehash failed: %v", err)
-	}
+	_ = u.cHash.UpdateLookupTable(snapshot.Peers)
+	u.snapshotVersion = snapshot.Version
 }

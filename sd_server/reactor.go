@@ -1,0 +1,337 @@
+package sd_server
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_session"
+	"github.com/near-notfaraway/stevedore/sd_socket"
+	"github.com/near-notfaraway/stevedore/sd_upstream"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	reactorPollTimeoutMs    = 1000
+	defaultRecvBatchesPerFD = 8
+)
+
+type Reactor struct {
+	id             int                                           // unique reactor id
+	config         *sd_config.Config                             // immutable global configuration
+	selector       sd_socket.Selector                            // reactor-local epoll selector
+	listenFD       int                                           // SO_REUSEPORT listener owned by this reactor
+	wakeFD         int                                           // eventfd used to continue budgeted ET reads
+	sessions       map[sd_socket.SockaddrKey]*sd_session.Session // downstream key to session
+	sessionsByFD   map[int]*sd_session.Session                   // upstream fd to session
+	sessionWheel   *sd_session.Wheel                             // reactor-local idle session time wheel
+	upstreamMgr    *sd_upstream.Manager                          // immutable routes and shared upstream state
+	rxMC           *sd_socket.MMsgContainer                      // reactor-local shared batch receive buffers
+	txMC           *sd_socket.SendMMsgContainer                  // reactor-local zero-copy batch send descriptors
+	readyFDs       []int                                         // reactor-local round-robin ready queue
+	readySet       map[int]struct{}                              // prevents duplicate fds in readyFDs
+	recvBatchLimit int                                           // maximum recvmmsg calls per fd per round
+	clockStart     time.Time                                     // monotonic origin for session expiration
+	logger         *logrus.Entry                                 // reactor-scoped logger
+}
+
+func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *sd_upstream.Manager) (*Reactor, error) {
+	eventSize := config.Server.EventSize
+	if eventSize < 1 {
+		eventSize = sd_socket.DefaultEventSize
+	}
+	selector, err := sd_socket.NewEpoller(eventSize, true)
+	if err != nil {
+		return nil, fmt.Errorf("create selector: %w", err)
+	}
+
+	listenFD, err := sd_socket.UDPBoundSocket(listenSa, true, true, true)
+	if err != nil {
+		_ = selector.Close()
+		return nil, fmt.Errorf("create listen socket: %w", err)
+	}
+	if err = selector.Add(listenFD, sd_socket.SelectorEventRead); err != nil {
+		_ = unix.Close(listenFD)
+		_ = selector.Close()
+		return nil, fmt.Errorf("add listen socket to selector: %w", err)
+	}
+	wakeFD, err := sd_socket.NewEventFD()
+	if err != nil {
+		_ = selector.Del(listenFD)
+		_ = unix.Close(listenFD)
+		_ = selector.Close()
+		return nil, fmt.Errorf("create reactor wake fd: %w", err)
+	}
+	if err = selector.Add(wakeFD, sd_socket.SelectorEventRead); err != nil {
+		_ = unix.Close(wakeFD)
+		_ = selector.Del(listenFD)
+		_ = unix.Close(listenFD)
+		_ = selector.Close()
+		return nil, fmt.Errorf("add reactor wake fd to selector: %w", err)
+	}
+
+	recycleInterval := config.Session.RecycleIntervalSec
+	if recycleInterval < 1 {
+		recycleInterval = 1
+	}
+	recvBatchLimit := config.Server.MaxRecvBatchesPerFD
+	if recvBatchLimit < 1 {
+		recvBatchLimit = defaultRecvBatchesPerFD
+	}
+	clockStart := time.Now()
+	return &Reactor{
+		id:             id,
+		config:         config,
+		selector:       selector,
+		listenFD:       listenFD,
+		wakeFD:         wakeFD,
+		sessions:       make(map[sd_socket.SockaddrKey]*sd_session.Session),
+		sessionsByFD:   make(map[int]*sd_session.Session),
+		sessionWheel:   sd_session.NewWheel(recycleInterval, config.Session.TimeoutSec, 0),
+		upstreamMgr:    upstreamMgr,
+		rxMC:           sd_socket.NewMMsgContainer(config.Server.BatchSize, config.Server.BufSize),
+		txMC:           sd_socket.NewSendMMsgContainer(config.Server.BatchSize),
+		readyFDs:       make([]int, 0, eventSize),
+		readySet:       make(map[int]struct{}),
+		recvBatchLimit: recvBatchLimit,
+		clockStart:     clockStart,
+		logger:         logrus.WithField("reactor_id", id),
+	}, nil
+}
+
+func (r *Reactor) Serve(ctx context.Context) error {
+	r.logger.Debug("start reactor")
+	defer r.close()
+
+	return r.selector.Polling(ctx, reactorPollTimeoutMs, func(evs []unix.EpollEvent) {
+		for i := range evs {
+			if evs[i].Events&unix.EPOLLIN == 0 {
+				continue
+			}
+
+			fd := int(evs[i].Fd)
+			if fd == r.wakeFD {
+				if err := sd_socket.DrainEventFD(r.wakeFD); err != nil {
+					r.logger.Errorf("drain reactor wake fd failed: %v", err)
+				}
+				continue
+			}
+			r.enqueueReady(fd)
+		}
+		r.processReady()
+		r.expireSessions(r.nowSec())
+	})
+}
+
+func (r *Reactor) nowSec() int64 {
+	return int64(time.Since(r.clockStart) / time.Second)
+}
+
+func (r *Reactor) enqueueReady(fd int) {
+	if fd != r.listenFD {
+		if _, ok := r.sessionsByFD[fd]; !ok {
+			return
+		}
+	}
+	if _, exists := r.readySet[fd]; exists {
+		return
+	}
+	r.readySet[fd] = struct{}{}
+	r.readyFDs = append(r.readyFDs, fd)
+}
+
+func (r *Reactor) processReady() {
+	current := r.readyFDs
+	r.readyFDs = current[:0]
+
+	for _, fd := range current {
+		delete(r.readySet, fd)
+
+		var needsRetry bool
+		if fd == r.listenFD {
+			needsRetry = r.handleUpload()
+		} else if sess, ok := r.sessionsByFD[fd]; ok {
+			needsRetry = r.handleDownload(sess)
+		}
+		if needsRetry {
+			r.enqueueReady(fd)
+		}
+	}
+
+	if len(r.readyFDs) > 0 {
+		if err := sd_socket.NotifyEventFD(r.wakeFD); err != nil {
+			r.logger.Errorf("notify reactor wake fd failed: %v", err)
+		}
+	}
+}
+
+func (r *Reactor) handleUpload() bool {
+	r.rxMC.ResetNameLengths()
+	for batch := 0; batch < r.recvBatchLimit; batch++ {
+		nPkt, errno := sd_socket.RecvMMsg(r.listenFD, r.rxMC)
+		if nPkt < 1 || errno != 0 {
+			if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
+				r.logger.Errorf("receive upload packets failed: %s", os.NewSyscallError("recvmmsg", errno))
+			}
+			return false
+		}
+
+		now := r.nowSec()
+		for i := 0; i < nPkt; i++ {
+			r.handleUploadPacket(i, now)
+		}
+	}
+	return true
+}
+
+func (r *Reactor) handleUploadPacket(index int, now int64) {
+	nr := r.rxMC.GetLengthOfMsg(index)
+	buf := r.rxMC.GetBufOfMsg(index)[:nr]
+	key := r.rxMC.GetRSockaddrKeyOfMsg(index)
+
+	sess := r.sessions[key]
+	if sess == nil {
+		var err error
+		sess, err = r.createSession(key)
+		if err != nil {
+			r.logger.Errorf("create session failed: %v", err)
+			return
+		}
+	} else {
+		r.sessionWheel.Touch(sess, now)
+	}
+
+	if r.logger.Logger.IsLevelEnabled(logrus.DebugLevel) {
+		r.logger.Debugf("upload packet: session_fd=%d data=%v", sess.GetFD(), buf)
+	}
+
+	upstream := r.upstreamMgr.RouteUpstream(buf)
+	if upstream == nil {
+		r.logger.Info("can not route upstream")
+		return
+	}
+
+	for try := 0; try < r.config.Server.MaxTryTimes; try++ {
+		peer := upstream.SelectPeer(buf)
+		if peer == nil {
+			r.logger.Error("select peer failed")
+			continue
+		}
+		err := peer.Send(sess.GetFD(), buf)
+		if err == nil {
+			return
+		}
+		r.logger.Warnf("upload to peer %s failed: %v", peer.GetAddr(), err)
+		if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
+			upstream.MarkPeerDead(peer)
+		}
+	}
+	r.logger.Error("upload packet failed, drop it")
+}
+
+func (r *Reactor) createSession(key sd_socket.SockaddrKey) (*sd_session.Session, error) {
+	fd, err := sd_socket.UDPSocket(unix.AF_INET, true, false, false)
+	if err != nil {
+		return nil, err
+	}
+	if err = r.selector.Add(fd, sd_socket.SelectorEventRead); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+
+	sess := sd_session.NewSession(key, fd)
+	r.sessions[key] = sess
+	r.sessionsByFD[fd] = sess
+	r.sessionWheel.Add(sess, r.nowSec())
+	return sess, nil
+}
+
+func (r *Reactor) handleDownload(sess *sd_session.Session) bool {
+	for batch := 0; batch < r.recvBatchLimit; batch++ {
+		nPkt, errno := sd_socket.RecvMMsg(sess.GetFD(), r.rxMC)
+		if nPkt < 1 || errno != 0 {
+			if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
+				r.logger.Errorf("receive download packets failed: %s", os.NewSyscallError("recvmmsg", errno))
+				r.removeSession(sess)
+			}
+			return false
+		}
+
+		r.sessionWheel.Touch(sess, r.nowSec())
+		key := sess.GetKey()
+		for i := 0; i < nPkt; i++ {
+			nr := r.rxMC.GetLengthOfMsg(i)
+			buf := r.rxMC.GetBufOfMsg(i)[:nr]
+			r.txMC.Prepare(i, buf, key)
+		}
+		if err := r.sendDownloadBatch(nPkt); err != nil {
+			r.logger.Errorf("send packets to downstream failed: %v", err)
+		}
+	}
+	return true
+}
+
+func (r *Reactor) sendDownloadBatch(packetCount int) error {
+	sent := 0
+	for sent < packetCount {
+		n, err := sd_socket.SendMMsg(r.listenFD, r.txMC.MMsg[sent:packetCount])
+		if err != nil {
+			var firstErr error
+			for i := sent; i < packetCount; i++ {
+				if sendErr := sd_socket.SendMsg(r.listenFD, &r.txMC.MMsg[i]); sendErr != nil && firstErr == nil {
+					firstErr = sendErr
+				}
+			}
+			return firstErr
+		}
+		if n < 1 {
+			return fmt.Errorf("sendmmsg sent no packets")
+		}
+		sent += n
+	}
+	return nil
+}
+
+func (r *Reactor) expireSessions(now int64) {
+	r.sessionWheel.Advance(now, r.closeSession)
+}
+
+func (r *Reactor) removeSession(sess *sd_session.Session) {
+	r.sessionWheel.Remove(sess)
+	r.closeSession(sess)
+}
+
+func (r *Reactor) closeSession(sess *sd_session.Session) {
+	delete(r.sessions, sess.GetKey())
+	delete(r.sessionsByFD, sess.GetFD())
+	if err := r.selector.Del(sess.GetFD()); err != nil {
+		r.logger.Errorf("delete session fd from selector failed: %v", err)
+	}
+	if err := sess.Close(); err != nil {
+		r.logger.Errorf("close session fd failed: %v", err)
+	}
+}
+
+func (r *Reactor) close() {
+	for _, sess := range r.sessions {
+		r.removeSession(sess)
+	}
+	if err := r.selector.Del(r.wakeFD); err != nil {
+		r.logger.Errorf("delete wake fd from selector failed: %v", err)
+	}
+	if err := unix.Close(r.wakeFD); err != nil {
+		r.logger.Errorf("close wake fd failed: %v", err)
+	}
+	if err := r.selector.Del(r.listenFD); err != nil {
+		r.logger.Errorf("delete listen fd from selector failed: %v", err)
+	}
+	if err := unix.Close(r.listenFD); err != nil {
+		r.logger.Errorf("close listen fd failed: %v", err)
+	}
+	if err := r.selector.Close(); err != nil {
+		r.logger.Errorf("close selector failed: %v", err)
+	}
+}

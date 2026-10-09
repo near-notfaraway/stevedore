@@ -3,8 +3,9 @@ package sd_socket
 import (
 	"context"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 const DefaultEventSize = 1024
@@ -22,7 +23,8 @@ type Selector interface {
 	Add(fd int, ev SelectorEvent) error
 	Mod(fd int, ev SelectorEvent) error
 	Del(fd int) error
-	Polling(ctx context.Context, handle func(evs []unix.EpollEvent)) error
+	Polling(ctx context.Context, timeoutMs int, handle func(evs []unix.EpollEvent)) error
+	Close() error
 }
 
 //------------------------------------------------------------------------------
@@ -120,14 +122,14 @@ func (s *Epoller) Del(fd int) error {
 	return nil
 }
 
-func (s *Epoller) Polling(ctx context.Context, handle func(evs []unix.EpollEvent)) error {
+func (s *Epoller) Polling(ctx context.Context, timeoutMs int, handle func(evs []unix.EpollEvent)) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 
 		default:
-			n, err := unix.EpollWait(s.fd, s.evs, -1)
+			n, err := unix.EpollWait(s.fd, s.evs, timeoutMs)
 			if err != nil && err != unix.EINTR {
 				return os.NewSyscallError("epoll_wait", err)
 			}

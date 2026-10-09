@@ -6,6 +6,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,7 +24,7 @@ type HealthChecker struct {
 	failedCounter     []int         // failed times counter for peers
 	checkFds          []int         // used to send check packet
 	counterMu         sync.Mutex    // counter lock
-	changedFlag       bool          // if has a peer state changed in a check
+	changedFlag       int32         // atomic flag indicating a state change in this round
 }
 
 func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *HealthChecker {
@@ -70,7 +71,7 @@ func (c *HealthChecker) Check(changedCh chan<- struct{}) {
 
 func (c *HealthChecker) checkPeers(changedCh chan<- struct{}) {
 	// check peers one by one concurrently
-	c.changedFlag = false
+	atomic.StoreInt32(&c.changedFlag, 0)
 	wg := &sync.WaitGroup{}
 	for _, peer := range c.peers {
 		wg.Add(1)
@@ -79,7 +80,7 @@ func (c *HealthChecker) checkPeers(changedCh chan<- struct{}) {
 	wg.Wait()
 
 	// if has a peer state changed
-	if c.changedFlag {
+	if atomic.LoadInt32(&c.changedFlag) != 0 {
 		changedCh <- struct{}{}
 	}
 }
@@ -88,32 +89,32 @@ func (c *HealthChecker) checkOnePeer(peer *Peer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	checkBuf := []byte("heartbeat")
 	checkFd := c.checkFds[peer.id]
-	timer := time.NewTimer(c.heartbeatTimeout)
 
 	// send heartbeat packet
 	err := unix.Send(checkFd, checkBuf, 0)
 	if err != nil {
 		logrus.Debugf("result of check on upstream %s is failed ", peer.addr)
 		if c.handleFailedCheck(peer) {
-			c.changedFlag = true
+			atomic.StoreInt32(&c.changedFlag, 1)
 		}
 		return
 	}
 
 	// after heartbeat timeout, determining failure based on fd error
+	timer := time.NewTimer(c.heartbeatTimeout)
 	<-timer.C
 	v, err := unix.GetsockoptInt(checkFd, unix.SOL_SOCKET, unix.SO_ERROR)
 	if err != nil || v != 0 {
 		logrus.Debugf("result of check on upstream %s is failed ", peer.addr)
 		if c.handleFailedCheck(peer) {
-			c.changedFlag = true
+			atomic.StoreInt32(&c.changedFlag, 1)
 		}
 		return
 	}
 
 	logrus.Debugf("result of check on upstream %s is succeed ", peer.addr)
 	if c.handleSuccessCheck(peer) {
-		c.changedFlag = true
+		atomic.StoreInt32(&c.changedFlag, 1)
 	}
 }
 
