@@ -43,7 +43,9 @@
       {
         "Name": "default",
         "Type": "chash",
-        "KeyBytes": "1:3",
+        "KeyBytes": "1:2,3:4",
+        "KeyMask": "0xff0f",
+        "InvalidKeyPolicy": "drop",
         "HealthChecker": {
           "HeartbeatIntervalSec": 5,
           "HeartbeatTimeoutSec": 3,

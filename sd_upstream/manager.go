@@ -48,9 +48,7 @@ type Manager struct {
 func (m *Manager) RouteUpstream(data []byte) Upstream {
 	for _, route := range m.routes {
 		if route.Match(data) {
-			if upstream, ok := m.upstreams[route.upstream]; ok {
-				return upstream
-			}
+			return m.upstreams[route.upstream]
 		}
 	}
 	return m.defaultUpstream

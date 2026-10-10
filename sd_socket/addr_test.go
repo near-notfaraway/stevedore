@@ -121,15 +121,16 @@ func TestNameBufferToUDPAddr(t *testing.T) {
 	})
 
 	t.Run("IPv6", func(t *testing.T) {
+		const missingInterfaceZone = "1073741824"
 		buf, nameLen := UDPAddrToNameBuffer(&net.UDPAddr{
 			IP:   net.ParseIP("2001:db8::8"),
 			Port: 8443,
-			Zone: "13",
+			Zone: missingInterfaceZone,
 		})
 		addr := NameBufferToUDPAddr(buf, nameLen)
 		require.True(t, addr.IP.Equal(net.ParseIP("2001:db8::8")))
 		require.Equal(t, 8443, addr.Port)
-		require.Equal(t, "13", addr.Zone)
+		require.Equal(t, missingInterfaceZone, addr.Zone)
 	})
 
 	require.Nil(t, NameBufferToUDPAddr(make([]byte, SizeofSockaddrInet6), 0))

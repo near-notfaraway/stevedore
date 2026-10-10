@@ -12,7 +12,7 @@ func time33HashValue(bytes []byte, layer int) uint {
 	return hashValue
 }
 
-const LookupTableSize = 997
+const LookupTableSize = 65537
 
 var NoOnePeerError = errors.New("no one peer in chash")
 
@@ -68,7 +68,6 @@ func (c *ConsistentHash) UpdateLookupTable(peers []*Peer) error {
 
 			offset := permutation[i*2]
 			skip := permutation[i*2+1]
-			next[i]++
 			pos := (offset + next[i]*skip) % len(c.lookupTable)
 			for c.lookupTable[pos] != nil {
 				next[i]++

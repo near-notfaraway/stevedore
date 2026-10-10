@@ -5,7 +5,7 @@ Stevedore 实现了一个四层负载均衡，并且可根据四层数据包的�
 
 - 四层协议目前支持 UDP，也可应用于 KCP、QUIC、TFTP 协议，或基于 UDP 的一些私有协议
 - 数据包的上游选择，支持基于字节进行匹配，甚至基于比特来进行匹配
-- 数据包的负载均衡，支持指定的字节作为 hash key
+- 数据包的负载均衡，支持组合多个字节区间并通过掩码提取 hash key
 - Linux 使用 `epoll`、`recvmmsg` 和 `sendmmsg` 优化转发性能
 - macOS 使用 `kqueue` 和兼容的逐包收发路径，便于本地开发与运行
 - 具有健康检查功能，当节点均不可用时，支持启用某个指定为备用的节点
@@ -93,7 +93,8 @@ bin/stevedore -config etc/config.example.json
     {
       "Name": "kcp",
       "Type": "chash",              // 一致性哈希
-      "KeyBytes": "0:4",            // 使用 data[0:4] 来作为 hash key 
+      "KeyBytes": "0:4",            // 使用 data[0:4] 作为 hash key
+      "InvalidKeyPolicy": "drop",   // payload 过短时丢弃
       "HealthChecker": {
         "HeartbeatIntervalSec": 5,
         "HeartbeatTimeoutSec": 3,
@@ -124,6 +125,18 @@ bin/stevedore -config etc/config.example.json
   ]
 }
 ```
+
+`chash` 的 payload key 支持以下配置：
+
+- `KeyBytes`：一个或多个半开字节区间，多个区间使用逗号分隔并按配置顺序拼接。例如
+  `"0:2,4:6"` 提取 `data[0:2] + data[4:6]`。
+- `KeyMask`：可选的十六进制或二进制掩码，与拼接后的 key 逐字节按位 AND，长度必须
+  与 key 相同。例如 `"0xff0f00f0"`，或单字节位区间掩码 `"0b11110000"`。
+- `InvalidKeyPolicy`：payload 长度不足时的处理策略。空值或 `"drop"` 返回无可用 Peer
+  并最终丢弃数据包；`"rr"` 回退到同一 Upstream 的加权轮询，但不再保证相同 key
+  落到同一节点。
+
+无效区间、负数索引、掩码格式或长度不匹配、未知策略都会在启动时直接拒绝。
 
 ### 协议版本兼容
 #### 需求

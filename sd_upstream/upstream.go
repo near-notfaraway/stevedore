@@ -2,8 +2,6 @@ package sd_upstream
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/sirupsen/logrus"
@@ -12,6 +10,9 @@ import (
 const (
 	UpstreamTypeRR    = "rr"
 	UpstreamTypeCHash = "chash"
+
+	InvalidKeyPolicyDrop = "drop"
+	InvalidKeyPolicyRR   = "rr"
 )
 
 type Upstream interface {
@@ -59,6 +60,8 @@ func InitUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup 
 
 const MaxUint64 = 18446744073709551615
 
+const maxRRListSize = 1 << 16
+
 type RRUpstream struct {
 	group           *PeerGroup // shared peer control plane
 	snapshotVersion uint64     // version used to build rrList
@@ -101,74 +104,102 @@ func (u *RRUpstream) syncSnapshot() {
 }
 
 func buildRRList(peers []*Peer) []*Peer {
-	sumWeight := 0
-	maxWeight := 0
+	weightDivisor := 0
 	for _, peer := range peers {
-		if peer.weight > maxWeight {
-			maxWeight = peer.weight
-		}
 		if peer.weight > 0 {
-			sumWeight += peer.weight
+			weightDivisor = greatestCommonDivisor(weightDivisor, peer.weight)
 		}
 	}
-	if sumWeight == 0 || maxWeight == 0 {
+	if weightDivisor == 0 {
 		return nil
 	}
 
-	idx := 0
-	rrList := make([]*Peer, sumWeight)
-	for i := 0; i < maxWeight; i++ {
-		for _, peer := range peers {
-			if peer.weight-i > 0 {
-				rrList[idx] = peer
-				idx++
+	weights := make([]int, len(peers))
+	totalWeight := 0
+	for i, peer := range peers {
+		if peer.weight <= 0 {
+			continue
+		}
+		weights[i] = peer.weight / weightDivisor
+		if weights[i] > maxRRListSize-totalWeight {
+			panic(fmt.Errorf("normalized rr weight sum exceeds %d", maxRRListSize))
+		}
+		totalWeight += weights[i]
+	}
+
+	rrList := make([]*Peer, totalWeight)
+	currentWeights := make([]int, len(peers))
+	for pos := range rrList {
+		selected := -1
+		for i, weight := range weights {
+			if weight == 0 {
+				continue
+			}
+			currentWeights[i] += weight
+			if selected == -1 || currentWeights[i] > currentWeights[selected] {
+				selected = i
 			}
 		}
+		rrList[pos] = peers[selected]
+		currentWeights[selected] -= totalWeight
 	}
 	return rrList
+}
+
+func greatestCommonDivisor(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
 }
 
 type CHashUpstream struct {
 	group           *PeerGroup      // shared peer control plane
 	snapshotVersion uint64          // version used to build cHash
 	cHash           *ConsistentHash // reactor-local lookup table
-	keyStart        int             // start index used to extract key
-	keyEnd          int             // end index used to extract key
+	key             *payloadKey     // extracts and masks the payload hash key
+	fallback        *RRUpstream     // optional fallback for invalid payload keys
 }
 
 func NewCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *CHashUpstream {
-	keyIdx := strings.Split(config.KeyBytes, ":")
-	if len(keyIdx) != 2 {
-		logrus.Panicf("key bytes %s is invalid in upstream %s", config.KeyBytes, config.Name)
-	}
-	keyStart, err := strconv.Atoi(keyIdx[0])
+	key, err := newPayloadKey(config.KeyBytes, config.KeyMask)
 	if err != nil {
-		logrus.Panicf("key start %s is invalid in upstream %s", keyIdx[0], config.Name)
+		logrus.Panicf("payload key is invalid in upstream %s: %v", config.Name, err)
 	}
-	keyEnd, err := strconv.Atoi(keyIdx[1])
-	if err != nil {
-		logrus.Panicf("key end %s is invalid in upstream %s", keyIdx[1], config.Name)
+
+	policy := config.InvalidKeyPolicy
+	if policy == "" {
+		policy = InvalidKeyPolicyDrop
 	}
-	if keyStart >= keyEnd {
-		logrus.Panicf("key start %s >= key end %s in upstream %s", keyIdx[0], keyIdx[1], config.Name)
+	var fallback *RRUpstream
+	switch policy {
+	case InvalidKeyPolicyDrop:
+	case InvalidKeyPolicyRR:
+		fallback = NewRRUpstream(group)
+	default:
+		logrus.Panicf("invalid key policy %s in upstream %s", policy, config.Name)
 	}
 
 	ups := &CHashUpstream{
 		group:    group,
 		cHash:    NewConsistentHash(nil),
-		keyStart: keyStart,
-		keyEnd:   keyEnd,
+		key:      key,
+		fallback: fallback,
 	}
 	ups.syncSnapshot()
 	return ups
 }
 
 func (u *CHashUpstream) SelectPeer(data []byte) *Peer {
-	if len(data) < u.keyEnd {
+	key, ok := u.key.Extract(data)
+	if !ok {
+		if u.fallback != nil {
+			return u.fallback.SelectPeer(data)
+		}
 		return nil
 	}
 	u.syncSnapshot()
-	return u.cHash.SelectPeer(data[u.keyStart:u.keyEnd])
+	return u.cHash.SelectPeer(key)
 }
 
 func (u *CHashUpstream) MarkPeerDead(peer *Peer) {

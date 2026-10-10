@@ -1,11 +1,12 @@
 package sd_upstream
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_util"
 	"github.com/sirupsen/logrus"
-	"strconv"
-	"strings"
 )
 
 //------------------------------------------------------------------------------
@@ -31,6 +32,9 @@ func NewRoute(id int, config sd_config.RouteConfig) *Route {
 	bytesEnd, err := strconv.Atoi(bytesIdx[1])
 	if err != nil {
 		logrus.Panicf("bytes end %s is invalid in route %d", bytesIdx[1], id)
+	}
+	if bytesStart < 0 {
+		logrus.Panicf("bytes start %s is negative in route %d", bytesIdx[0], id)
 	}
 	if bytesStart >= bytesEnd {
 		logrus.Panicf("bytes start %s is not less than bytes end %s in route %d", bytesIdx[0], bytesIdx[1], id)

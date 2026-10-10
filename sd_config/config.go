@@ -38,11 +38,13 @@ type UploadConfig struct {
 }
 
 type UpstreamConfig struct {
-	Name          string
-	Type          string
-	KeyBytes      string
-	Peers         []*PeerConfig
-	HealthChecker *HealthCheckerConfig
+	Name             string
+	Type             string
+	KeyBytes         string
+	KeyMask          string
+	InvalidKeyPolicy string
+	Peers            []*PeerConfig
+	HealthChecker    *HealthCheckerConfig
 }
 
 type PeerConfig struct {
