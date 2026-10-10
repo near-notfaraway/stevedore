@@ -1,12 +1,6 @@
 package sd_socket
 
-import (
-	"context"
-	"fmt"
-	"os"
-
-	"golang.org/x/sys/unix"
-)
+import "context"
 
 const DefaultEventSize = 1024
 
@@ -19,125 +13,16 @@ const (
 	SelectorEventReadWrite
 )
 
+type PolledEvent struct {
+	FD     int
+	Events SelectorEvent
+}
+
 type Selector interface {
 	Add(fd int, ev SelectorEvent) error
 	Mod(fd int, ev SelectorEvent) error
 	Del(fd int) error
-	Polling(ctx context.Context, timeoutMs int, handle func(evs []unix.EpollEvent)) error
+	Wake() error
+	Polling(ctx context.Context, timeoutMs int, handle func(evs []PolledEvent)) error
 	Close() error
-}
-
-//------------------------------------------------------------------------------
-// Epoller: a selector base on epoll
-//------------------------------------------------------------------------------
-
-type Epoller struct {
-	fd  int               // epoll fd
-	evs []unix.EpollEvent // max events per poll
-	et  bool              // if use edge trigger
-}
-
-func NewEpoller(eventSize int, et bool) (Selector, error) {
-	if eventSize < 1 {
-		eventSize = DefaultEventSize
-	}
-
-	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
-	if err != nil {
-		return nil, os.NewSyscallError("epoll_create1", err)
-	}
-
-	return &Epoller{
-		fd:  fd,
-		evs: make([]unix.EpollEvent, eventSize),
-		et:  et,
-	}, nil
-}
-
-func (s *Epoller) Close() error {
-	if err := unix.Close(s.fd); err != nil {
-		return os.NewSyscallError("close", err)
-	}
-
-	return nil
-}
-
-func (s *Epoller) Add(fd int, ev SelectorEvent) error {
-	e := &unix.EpollEvent{
-		Fd: int32(fd),
-	}
-	if s.et {
-		e.Events = unix.EPOLLET
-	}
-
-	switch ev {
-	case SelectorEventRead:
-		e.Events |= unix.EPOLLIN
-	case SelectorEventWrite:
-		e.Events |= unix.EPOLLOUT
-	case SelectorEventReadWrite:
-		e.Events |= unix.EPOLLIN | unix.EPOLLOUT
-	default:
-		return fmt.Errorf("unknow epoll event type: %d", ev)
-	}
-
-	if err := unix.EpollCtl(s.fd, unix.EPOLL_CTL_ADD, fd, e); err != nil {
-		return os.NewSyscallError("epoll_ctl add", err)
-	}
-
-	return nil
-}
-
-func (s *Epoller) Mod(fd int, ev SelectorEvent) error {
-	e := &unix.EpollEvent{
-		Fd: int32(fd),
-	}
-	if s.et {
-		e.Events = unix.EPOLLET
-	}
-
-	switch ev {
-	case SelectorEventRead:
-		e.Events |= unix.EPOLLIN
-	case SelectorEventWrite:
-		e.Events |= unix.EPOLLOUT
-	case SelectorEventReadWrite:
-		e.Events |= unix.EPOLLIN | unix.EPOLLOUT
-	default:
-		return fmt.Errorf("unknow epoll event type: %d", ev)
-	}
-
-	if err := unix.EpollCtl(s.fd, unix.EPOLL_CTL_MOD, fd, e); err != nil {
-		return os.NewSyscallError("epoll_ctl mod", err)
-	}
-
-	return nil
-}
-
-func (s *Epoller) Del(fd int) error {
-	if err := unix.EpollCtl(s.fd, unix.EPOLL_CTL_DEL, fd, nil); err != nil {
-		return os.NewSyscallError("epoll_ctl del", err)
-	}
-
-	return nil
-}
-
-func (s *Epoller) Polling(ctx context.Context, timeoutMs int, handle func(evs []unix.EpollEvent)) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-
-		default:
-			n, err := unix.EpollWait(s.fd, s.evs, timeoutMs)
-			if err != nil && err != unix.EINTR {
-				return os.NewSyscallError("epoll_wait", err)
-			}
-
-			if n < 0 {
-				continue
-			}
-			handle(s.evs[:n])
-		}
-	}
 }

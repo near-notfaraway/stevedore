@@ -2,8 +2,9 @@ package sd_socket
 
 import (
 	"encoding/binary"
-	"golang.org/x/sys/unix"
 	"net"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -151,6 +152,33 @@ func NameBufferToSockaddr(buf []byte, len uint32) unix.Sockaddr {
 	return nil
 }
 
+func SockaddrToNameBuffer(sa unix.Sockaddr) ([]byte, uint32) {
+	switch addr := sa.(type) {
+	case *unix.SockaddrInet4:
+		if addr.Port < 0 || addr.Port > 0xffff {
+			return nil, 0
+		}
+
+		buf := make([]byte, SizeofSockaddrInet4)
+		binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port))
+		copy(buf[4:8], addr.Addr[:])
+		return buf, SizeofSockaddrInet4
+
+	case *unix.SockaddrInet6:
+		if addr.Port < 0 || addr.Port > 0xffff {
+			return nil, 0
+		}
+
+		buf := make([]byte, SizeofSockaddrInet6)
+		binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port))
+		copy(buf[8:24], addr.Addr[:])
+		binary.BigEndian.PutUint32(buf[24:28], addr.ZoneId)
+		return buf, SizeofSockaddrInet6
+	}
+
+	return nil, 0
+}
+
 // Converts a name buffer to a net.UDPAddr
 // Returns nil if conversion fails
 func NameBufferToUDPAddr(buf []byte, len uint32) *net.UDPAddr {
@@ -174,4 +202,12 @@ func NameBufferToUDPAddr(buf []byte, len uint32) *net.UDPAddr {
 	}
 
 	return nil
+}
+
+func UDPAddrToNameBuffer(addr *net.UDPAddr) ([]byte, uint32) {
+	if addr == nil {
+		return nil, 0
+	}
+
+	return SockaddrToNameBuffer(UDPAddrToSockaddr(addr))
 }

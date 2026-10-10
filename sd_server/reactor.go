@@ -22,9 +22,8 @@ const (
 type Reactor struct {
 	id             int                                           // unique reactor id
 	config         *sd_config.Config                             // immutable global configuration
-	selector       sd_socket.Selector                            // reactor-local epoll selector
+	selector       sd_socket.Selector                            // reactor-local platform selector
 	listenFD       int                                           // SO_REUSEPORT listener owned by this reactor
-	wakeFD         int                                           // eventfd used to continue budgeted ET reads
 	sessions       map[sd_socket.SockaddrKey]*sd_session.Session // downstream key to session
 	sessionsByFD   map[int]*sd_session.Session                   // upstream fd to session
 	sessionWheel   *sd_session.Wheel                             // reactor-local idle session time wheel
@@ -43,7 +42,7 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 	if eventSize < 1 {
 		eventSize = sd_socket.DefaultEventSize
 	}
-	selector, err := sd_socket.NewEpoller(eventSize, true)
+	selector, err := sd_socket.NewSelector(eventSize, true)
 	if err != nil {
 		return nil, fmt.Errorf("create selector: %w", err)
 	}
@@ -57,20 +56,6 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 		_ = unix.Close(listenFD)
 		_ = selector.Close()
 		return nil, fmt.Errorf("add listen socket to selector: %w", err)
-	}
-	wakeFD, err := sd_socket.NewEventFD()
-	if err != nil {
-		_ = selector.Del(listenFD)
-		_ = unix.Close(listenFD)
-		_ = selector.Close()
-		return nil, fmt.Errorf("create reactor wake fd: %w", err)
-	}
-	if err = selector.Add(wakeFD, sd_socket.SelectorEventRead); err != nil {
-		_ = unix.Close(wakeFD)
-		_ = selector.Del(listenFD)
-		_ = unix.Close(listenFD)
-		_ = selector.Close()
-		return nil, fmt.Errorf("add reactor wake fd to selector: %w", err)
 	}
 
 	recycleInterval := config.Session.RecycleIntervalSec
@@ -87,7 +72,6 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 		config:         config,
 		selector:       selector,
 		listenFD:       listenFD,
-		wakeFD:         wakeFD,
 		sessions:       make(map[sd_socket.SockaddrKey]*sd_session.Session),
 		sessionsByFD:   make(map[int]*sd_session.Session),
 		sessionWheel:   sd_session.NewWheel(recycleInterval, config.Session.TimeoutSec, 0),
@@ -106,20 +90,12 @@ func (r *Reactor) Serve(ctx context.Context) error {
 	r.logger.Debug("start reactor")
 	defer r.close()
 
-	return r.selector.Polling(ctx, reactorPollTimeoutMs, func(evs []unix.EpollEvent) {
+	return r.selector.Polling(ctx, reactorPollTimeoutMs, func(evs []sd_socket.PolledEvent) {
 		for i := range evs {
-			if evs[i].Events&unix.EPOLLIN == 0 {
+			if evs[i].Events&sd_socket.SelectorEventRead == 0 {
 				continue
 			}
-
-			fd := int(evs[i].Fd)
-			if fd == r.wakeFD {
-				if err := sd_socket.DrainEventFD(r.wakeFD); err != nil {
-					r.logger.Errorf("drain reactor wake fd failed: %v", err)
-				}
-				continue
-			}
-			r.enqueueReady(fd)
+			r.enqueueReady(evs[i].FD)
 		}
 		r.processReady()
 		r.expireSessions(r.nowSec())
@@ -162,8 +138,8 @@ func (r *Reactor) processReady() {
 	}
 
 	if len(r.readyFDs) > 0 {
-		if err := sd_socket.NotifyEventFD(r.wakeFD); err != nil {
-			r.logger.Errorf("notify reactor wake fd failed: %v", err)
+		if err := r.selector.Wake(); err != nil {
+			r.logger.Errorf("wake reactor selector failed: %v", err)
 		}
 	}
 }
@@ -277,11 +253,12 @@ func (r *Reactor) handleDownload(sess *sd_session.Session) bool {
 func (r *Reactor) sendDownloadBatch(packetCount int) error {
 	sent := 0
 	for sent < packetCount {
-		n, err := sd_socket.SendMMsg(r.listenFD, r.txMC.MMsg[sent:packetCount])
+		n, err := sd_socket.SendMMsg(r.listenFD, r.txMC, sent, packetCount)
+		sent += n
 		if err != nil {
 			var firstErr error
 			for i := sent; i < packetCount; i++ {
-				if sendErr := sd_socket.SendMsg(r.listenFD, &r.txMC.MMsg[i]); sendErr != nil && firstErr == nil {
+				if sendErr := sd_socket.SendMsg(r.listenFD, r.txMC, i); sendErr != nil && firstErr == nil {
 					firstErr = sendErr
 				}
 			}
@@ -290,7 +267,6 @@ func (r *Reactor) sendDownloadBatch(packetCount int) error {
 		if n < 1 {
 			return fmt.Errorf("sendmmsg sent no packets")
 		}
-		sent += n
 	}
 	return nil
 }
@@ -318,12 +294,6 @@ func (r *Reactor) closeSession(sess *sd_session.Session) {
 func (r *Reactor) close() {
 	for _, sess := range r.sessions {
 		r.removeSession(sess)
-	}
-	if err := r.selector.Del(r.wakeFD); err != nil {
-		r.logger.Errorf("delete wake fd from selector failed: %v", err)
-	}
-	if err := unix.Close(r.wakeFD); err != nil {
-		r.logger.Errorf("close wake fd failed: %v", err)
 	}
 	if err := r.selector.Del(r.listenFD); err != nil {
 		r.logger.Errorf("delete listen fd from selector failed: %v", err)

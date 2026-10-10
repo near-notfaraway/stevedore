@@ -2,44 +2,47 @@
 
 ## 项目概述
 
-Stevedore 是一个使用 Go 编写、仅支持 Linux 的四层 UDP 负载均衡器。它根据
+Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负载均衡器。它根据
 数据包内容进行路由，然后通过加权轮询（`rr`）或加权一致性哈希（`chash`）
-选择上游节点。网络链路基于 Linux 的 `epoll`、`recvmmsg`、`sendmmsg` 和
-非阻塞套接字实现。
+选择上游节点。Linux 是生产性能目标，使用 `epoll`、`recvmmsg` 和
+`sendmmsg`；macOS 使用 `kqueue` 和基于 `recvfrom`/`sendmsg` 的兼容路径。
 
 - 模块：`github.com/near-notfaraway/stevedore`
-- Go 版本：1.17
+- Go 版本：以 `go.mod` 为准
 - 程序入口：`main.go`
 - 配置示例：`sd_config/config.example.json`
 - 支持的配置格式：JSON/JSONC 和 YAML
-- 运行目标：Linux amd64
-
-实际的命令行参数是 `-config`；README 中的 `-c` 示例已经过时。
+- 运行目标：Linux amd64、Darwin amd64/arm64
+- 命令行配置参数：`-config`
 
 ## 请求流程
 
 1. `main.go` 加载配置、按需启动 pprof、初始化日志并启动
    `sd_server.Server`。
-2. `sd_server.Server` 创建 `ListenParallel` 个独立 Reactor。每个 Reactor
+2. Linux 上，`sd_server.Server` 创建 `ListenParallel` 个独立 Reactor。macOS
+   的 `SO_REUSEPORT` 不提供 Linux 式多 listener 分流，因此有效并行度固定为
+   1，配置值大于 1 时记录警告。每个 Reactor
    独占一个启用 `SO_REUSEADDR`/`SO_REUSEPORT` 的监听套接字、一个边缘触发
-   epoll 选择器、一张 Session 表、一个共享 RX Container 和一个下行 TX
+   selector、一张 Session 表、一个共享 RX Container 和一个下行 TX
    Container。
-3. Reactor 直接通过 `recvmmsg` 批量读取客户端数据包，不经过任务池、
+3. Reactor 直接通过平台批量接收接口读取客户端数据包，不经过任务池、
    Channel 或额外 Worker。每个 fd 每轮最多执行 `MaxRecvBatchesPerFD` 次
-   `recvmmsg`；未排空的 fd 进入 Reactor 本地 ready queue，并由 eventfd
-   唤醒下一轮，避免热点 fd 饿死其他 Session。
-4. 下游地址由内核 `SO_REUSEPORT` 哈希稳定分配到 Reactor；Reactor 本地
-   Session 持有用于上游通信的 UDP fd，并注册到同一个 epoll。
+   批量接收；未排空的 fd 进入 Reactor 本地 ready queue，并通过 selector
+   自唤醒下一轮，避免热点 fd 饿死其他 Session。Linux 自唤醒使用 `eventfd`，
+   macOS 使用 `EVFILT_USER`。
+4. Linux 下游地址由内核 `SO_REUSEPORT` 哈希稳定分配到 Reactor；macOS
+   仅运行单 Reactor。Reactor 本地 Session 持有用于上游通信的 UDP fd，并
+   注册到同一个 selector。
 5. `sd_upstream.Registry` 共享健康检查与版本化 Peer 快照；每个 Reactor
    拥有独立 `Manager`、RR 游标、RR 列表和一致性哈希表。Manager 按配置
    顺序检查路由，首个匹配项生效；没有匹配项时使用 `DefaultUpstream`。
    默认上游不存在时丢弃数据包。
 6. 选中的 Upstream 通过加权轮询或一致性哈希选择健康 Peer，并发送数据包。
 7. 同一个 Reactor 批量读取 Session fd 的上游响应，通过自己的监听 fd
-   使用 `sendmmsg` 批量发送回原始下游地址。TX iovec 直接引用当前 RX batch
-   的 payload，只复制 sockaddr 元数据。Session 活跃时在 Reactor 本地侵入式
-   时间轮中 O(1) 续期；epoll 超时周期只处理当前到期桶，不遍历完整 Session
-   表。
+   发送回原始下游地址。Linux 的 TX iovec 直接引用当前 RX batch payload，
+   使用 `sendmmsg` 批量发送；macOS 通过同一 Container 接口逐包调用
+   `sendmsg`。Session 活跃时在 Reactor 本地侵入式时间轮中 O(1) 续期；
+   selector 超时周期只处理当前到期桶，不遍历完整 Session 表。
 
 ## 包职责
 
@@ -47,7 +50,8 @@ Stevedore 是一个使用 Go 编写、仅支持 Linux 的四层 UDP 负载均衡
 - `sd_server`：服务生命周期、分片 Reactor、Reactor 本地 Session 表及
   上传/下载数据包循环。
 - `sd_session`：由 Reactor 独占的 Session 状态和侵入式过期时间轮。
-- `sd_socket`：Linux 套接字、epoll、sockaddr 和批量消息系统调用封装。
+- `sd_socket`：平台 selector、套接字、sockaddr 和批量消息接口封装。带
+  `_linux.go`/`_darwin.go` 后缀的文件持有平台系统调用细节。
 - `sd_upstream`：共享 Peer/健康检查控制面，以及 Reactor 本地路由、轮询和
   一致性哈希数据面。
 - `sd_util`：配置解码、字节匹配和日志。
@@ -70,15 +74,17 @@ Stevedore 是一个使用 Go 编写、仅支持 Linux 的四层 UDP 负载均衡
 - ET fd 达到批次预算后必须重新排队并主动唤醒 Reactor，不能依赖内核再次
   产生可读边缘。
 - 下行 TX 描述符仅能在对应 RX batch payload 有效期间使用；必须在下一次
-  `recvmmsg` 覆盖缓冲前完成 `sendmmsg`。
-- 维护共享 Peer 状态和查找结构的并发安全。涉及竞态风险的改动应在 Linux
-  上运行 `go test -race`。
+  批量接收覆盖缓冲前完成发送。
+- 不要绕过 `sd_socket.Selector` 或批量消息接口在 Reactor 中直接引用
+  `unix.EpollEvent`、`unix.Kevent_t`、`MMsgHdr` 等平台结构。
+- 维护共享 Peer 状态和查找结构的并发安全。涉及竞态风险的改动应在支持的
+  本机平台运行 `go test -race ./...`。
 - Peer 健康快照由 Registry 原子发布；RR 游标、RR 列表和一致性哈希表必须
   保持 Reactor 本地所有权。
 - 不要仅为了通过测试而改变正确的生产逻辑。当实现契约本身正确时，应修正
   错误的断言或 Mock。
-- 修改纯逻辑时添加聚焦的测试。网络生命周期改动应尽可能增加 Linux 专用的
-  集成测试。
+- 修改纯逻辑时添加聚焦的测试。网络生命周期改动应增加对应平台的集成测试，
+  并通过另一平台的交叉构建。
 - 所有改动过的 Go 文件都必须运行 `gofmt`。标准库或现有依赖足以解决问题
   时，不要引入新依赖。
 - 新增或重命名配置字段时，同步更新 `sd_config/config.go`、
@@ -87,11 +93,14 @@ Stevedore 是一个使用 Go 编写、仅支持 Linux 的四层 UDP 负载均衡
 
 ## 构建与测试
 
-在 macOS 或其他非 Linux 开发环境中：
+在 macOS 中：
 
 ```bash
-go test ./sd_util
+go test ./...
+go test -race ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+make build-darwin
 ```
 
 在 Linux 环境中：
@@ -102,18 +111,17 @@ go test -race ./...
 make build
 ```
 
-运行指定工具测试：
+常用 Make 目标：
 
 ```bash
-go test ./sd_util -run TestName
+make test
+make test-race
+make build
+make build-darwin DARWIN_ARCH=arm64
 ```
 
-由于 `sd_socket` 直接使用 Linux 专属 API，`go test ./...` 无法在 macOS
-上编译。不要将缺少 epoll 或系统调用符号的错误视为代码回归。
-
-当前 `make test` 目标存在已知路径拼写错误（`./sd_utilR`），会因为该包
-不存在而失败。在 Makefile 修复前，请直接运行 `go test ./sd_util`。
-因此，`make` 和 `make all` 也会停止在测试阶段。
+`make build` 固定生成 Linux amd64 生产二进制。`make build-darwin` 默认
+使用当前 Go 工具链的架构，也可通过 `DARWIN_ARCH=amd64` 或 `arm64` 指定。
 
 ## 打包与运行
 
@@ -141,4 +149,5 @@ UDP 端点，不要期待使用示例中的 `10.0.0.x` 地址完成成功的冒�
 - Peer 列表更新不会与 Peer 选择发生竞态。
 - 空 Peer 集合、非法权重和缺少备用 Peer 的情况得到安全处理。
 - 路由和默认上游的数据包丢弃行为符合预期。
-- 使用上述命令通过测试和 Linux 交叉编译。
+- Darwin 上不会为 `ListenParallel > 1` 创建冗余 Reactor。
+- 使用上述命令通过本机测试、race 测试和 Linux 交叉构建。

@@ -6,22 +6,55 @@ Stevedore 实现了一个四层负载均衡，并且可根据四层数据包的�
 - 四层协议目前支持 UDP，也可应用于 KCP、QUIC、TFTP 协议，或基于 UDP 的一些私有协议
 - 数据包的上游选择，支持基于字节进行匹配，甚至基于比特来进行匹配
 - 数据包的负载均衡，支持指定的字节作为 hash key
-- 通过 epoll 搭配 recvmmsg 对转发效率进行优化，仅用于 linux 系统
+- Linux 使用 `epoll`、`recvmmsg` 和 `sendmmsg` 优化转发性能
+- macOS 使用 `kqueue` 和兼容的逐包收发路径，便于本地开发与运行
 - 具有健康检查功能，当节点均不可用时，支持启用某个指定为备用的节点
+
+## 平台差异
+
+| 平台 | 事件机制 | UDP 收发 | `ListenParallel` |
+| --- | --- | --- | --- |
+| Linux | `epoll` + `eventfd` | `recvmmsg` + `sendmmsg` | 按配置启用 `SO_REUSEPORT` 分片 |
+| macOS | `kqueue` + `EVFILT_USER` | `recvfrom` + `sendmsg` 兼容批量接口 | 固定为 1，配置大于 1 时记录警告 |
+
+Linux 是生产性能目标。macOS 支持完整功能，但没有 Linux 的批量系统调用和
+`SO_REUSEPORT` 多 Reactor 分流能力。
 
 ## 快速开始
 ### 编译
-``` bash
-cd ${stevedore_path}
-make
-mv output/stevedore ${target_dir}
+
+安装 `go.mod` 指定版本的 Go 工具链后执行：
+
+```bash
+# 测试当前平台
+make test
+
+# 构建 Linux amd64 生产二进制：./stevedore
+make build
+
+# 构建当前 Mac 架构：./stevedore-darwin-arm64 或 amd64
+make build-darwin
+
+# 指定 Intel Mac
+make build-darwin DARWIN_ARCH=amd64
+
+# 测试、构建 Linux amd64 并打包到 output/
+make all
 ```
 
 ### 启动
 
-``` bash
-cd ${target_dir}/stevedore
-bin/stevedore -c etc/stevedore.config
+直接构建后：
+
+```bash
+./stevedore -config sd_config/config.example.json
+```
+
+执行 `make all` 后：
+
+```bash
+cd output/stevedore
+bin/stevedore -config etc/config.example.json
 ```
 
 ## 最佳实践

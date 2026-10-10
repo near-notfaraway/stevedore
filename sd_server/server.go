@@ -25,6 +25,10 @@ func NewServer(config *sd_config.Config) *Server {
 	if parallel < 1 {
 		parallel = 1
 	}
+	if parallel > 1 && !sd_socket.ReusePortShardingSupported() {
+		logrus.Warnf("listen parallelism %d is not supported by this platform; using 1", parallel)
+		parallel = 1
+	}
 	s := &Server{
 		reactors:         make([]*Reactor, 0, parallel),
 		upstreamRegistry: sd_upstream.NewRegistry(config.Upload),

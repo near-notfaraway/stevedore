@@ -23,7 +23,7 @@ type LogConfig struct {
 
 type ServerConfig struct {
 	ListenAddr          string // listening address
-	ListenParallel      int    // number of independent reactors
+	ListenParallel      int    // requested reactors; Darwin currently uses one
 	EventSize           int    // size of events polling from each selector
 	BatchSize           int    // size of batch read/write packets
 	BufSize             int    // size of single read/write buffer
