@@ -19,7 +19,9 @@ func TestNewServerDarwinUsesSingleReactor(t *testing.T) {
 			BatchSize:      32,
 			BufSize:        4096,
 		},
-		Upload: &sd_config.UploadConfig{},
+		Upload: &sd_config.UploadConfig{
+			DefaultUpstream: "drop",
+		},
 		Session: &sd_config.SessionConfig{
 			RecycleIntervalSec: 1,
 			TimeoutSec:         1,

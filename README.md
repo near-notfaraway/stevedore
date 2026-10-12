@@ -191,25 +191,35 @@ key。以 KCP 为例，其报文结构如下：
 
 #### 转发效果
 版本 1 和版本 2 的数据包分别转发到 `ver1` 和 `ver2` 集群。其他版本及长度不足的报文
-不会命中路由；本例没有名为 `deny` 的 Upstream，因此这类报文会被丢弃。
+不会命中路由，并由值为 `"drop"` 的默认 Upstream 目标丢弃。
 
 ![](doc/media/example2-01.jpeg)
 
 #### 配置
 ``` json
 "Upload": {
-  "DefaultUpstream": "deny",        // 默认丢弃数据包，无此 Upstream
+  "DefaultUpstream": "drop",        // 未命中任何路由时丢弃
   "Routes": [
     {
-      "KeyBytes": "4:6",            // 当 data[4:6] == 0x0001 时
-      "Operator": "==",             // 转发到 ver1 Upstream
-      "Value": "0x0001",
+      "Name": "protocol-v1",
+      "Conditions": [
+        {
+          "KeyBytes": "4:6",        // 当 data[4:6] == 0x0001 时
+          "Operator": "==",
+          "Value": "0x0001"
+        }
+      ],
       "Upstream": "ver1"
     },
     {
-      "KeyBytes": "4:6",            // 当 data[4:6] == 0x0002 时
-      "Operator": "==",             // 转发到 ver2 Upstream
-      "Value": "0x0002",
+      "Name": "protocol-v2",
+      "Conditions": [
+        {
+          "KeyBytes": "4:6",        // 当 data[4:6] == 0x0002 时
+          "Operator": "==",
+          "Value": "0x0002"
+        }
+      ],
       "Upstream": "ver2"
     }
   ],
@@ -348,9 +358,13 @@ Stevedore 按配置顺序匹配，并使用首个命中的规则。
   "DefaultUpstream": "stable",       // 未命中灰度规则时走稳定集群
   "Routes": [
     {
-      "KeyBytes": "2:3",             // 提取 flag 字段
-      "Operator": "&=",              // (data[2] & 0x80) == 0x80
-      "Value": "0x80",
+      "Conditions": [
+        {
+          "KeyBytes": "2:3",         // 提取 flag 字段
+          "Operator": "&=",          // (data[2] & 0x80) == 0x80
+          "Value": "0x80"
+        }
+      ],
       "Upstream": "canary"
     }
   ],
@@ -402,6 +416,45 @@ Stevedore 按配置顺序匹配，并使用首个命中的规则。
 ```
 
 ## 配置能力说明
+
+payload 路由支持以下配置：
+
+- 每条路由必须配置非空 `Conditions` 数组，即使只有一个条件。
+- 多个 Conditions 按 AND 语义匹配，任一条件不满足时该路由不命中。
+- `Mask` 使用 `(payload & Mask) == Value` 语义，仅支持 `==` 和 `!==`。Mask、Value
+  和 `KeyBytes` 提取结果的长度必须一致，Value 不能包含 Mask 之外的置位。
+- `Name` 用于指标标识；省略时自动生成 `route-<index>`。路由名称不能重复。
+- `Upstream` 为空字符串或 `"drop"` 时丢弃；匹配已定义的 Upstream 名称时转发；
+  其他值会在启动时作为非法引用拒绝。
+- 未命中时使用 `DefaultUpstream`，其取值遵循与路由 `Upstream` 相同的语义。
+- 真实 Upstream 名称必须唯一，且不能使用空字符串或 `"drop"`。
+
+例如，以下规则要求魔数和带掩码的 flag 同时匹配：
+
+``` json
+{
+  "Name": "canary-v1",
+  "Conditions": [
+    {
+      "KeyBytes": "0:2",
+      "Operator": "==",
+      "Value": "0x1234"
+    },
+    {
+      "KeyBytes": "2:3",
+      "Operator": "==",
+      "Value": "0x80",
+      "Mask": "0xc0"
+    }
+  ],
+  "Upstream": "canary"
+}
+```
+
+未知 Operator、非法字节区间、重复路由名称以及不存在的 Upstream 引用都会在
+启动时直接拒绝。`Log.RouteStatsIntervalSec` 大于 0 时，Server 按该秒数周期输出每条
+路由命中数、默认命中数、短报文数和丢弃数的累计日志；值小于等于 0 时关闭统计，不执行
+热路径原子计数。路由匹配本身对所有 Operator 均保持零堆分配。
 
 `chash` 的 payload key 支持以下配置：
 

@@ -8,7 +8,8 @@
     "Level": "debug",
     "Verbose": false,
     "MaxAgeHour": 24,
-    "RotationTimeHour": 168
+    "RotationTimeHour": 168,
+    "RouteStatsIntervalSec": 0
   },
   "Server": {
     "ListenAddr": "0.0.0.0:2614",
@@ -24,18 +25,28 @@
     "TimeoutSec": 30
   },
   "Upload": {
-    "DefaultUpstream": "deny",
+    "DefaultUpstream": "drop",
     "Routes": [
       {
-        "KeyBytes": "0:1",
-        "Operator": "==",
-        "Value": "0x69",
+        "Name": "default-magic",
+        "Conditions": [
+          {
+            "KeyBytes": "0:1",
+            "Operator": "==",
+            "Value": "0x69"
+          }
+        ],
         "Upstream": "default"
       },
       {
-        "KeyBytes": "1:4",
-        "Operator": "==",
-        "Value": "0x998877",
+        "Name": "rr-sample-magic",
+        "Conditions": [
+          {
+            "KeyBytes": "1:4",
+            "Operator": "==",
+            "Value": "0x998877"
+          }
+        ],
         "Upstream": "rr_sample"
       }
     ],
