@@ -56,9 +56,6 @@ func (g *PeerGroup) refresh() {
 
 	healthy := make([]*Peer, 0, len(g.peers))
 	for _, peer := range g.peers {
-		if peer == g.backup {
-			continue
-		}
 		if peer.isAlive() {
 			healthy = append(healthy, peer)
 		}

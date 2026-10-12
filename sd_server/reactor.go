@@ -130,7 +130,7 @@ func (r *Reactor) processReady() {
 		if fd == r.listenFD {
 			needsRetry = r.handleUpload()
 		} else if sess, ok := r.sessionsByFD[fd]; ok {
-			needsRetry = r.handleDownload(sess)
+			needsRetry = r.handleDownload(fd, sess)
 		}
 		if needsRetry {
 			r.enqueueReady(fd)
@@ -170,18 +170,13 @@ func (r *Reactor) handleUploadPacket(index int, now int64) {
 
 	sess := r.sessions[key]
 	if sess == nil {
-		var err error
-		sess, err = r.createSession(key)
-		if err != nil {
-			r.logger.Errorf("create session failed: %v", err)
-			return
-		}
+		sess = r.createSession(key)
 	} else {
 		r.sessionWheel.Touch(sess, now)
 	}
 
 	if r.logger.Logger.IsLevelEnabled(logrus.DebugLevel) {
-		r.logger.Debugf("upload packet: session_fd=%d data=%v", sess.GetFD(), buf)
+		r.logger.Debugf("upload packet: data=%v", buf)
 	}
 
 	upstream := r.upstreamMgr.RouteUpstream(buf)
@@ -196,7 +191,12 @@ func (r *Reactor) handleUploadPacket(index int, now int64) {
 			r.logger.Error("select peer failed")
 			continue
 		}
-		err := peer.Send(sess.GetFD(), buf)
+		fd, err := r.getOrCreateSessionFD(sess, peer.GetFamily())
+		if err != nil {
+			r.logger.Errorf("create session socket failed: %v", err)
+			return
+		}
+		err = peer.Send(fd, buf)
 		if err == nil {
 			return
 		}
@@ -208,26 +208,35 @@ func (r *Reactor) handleUploadPacket(index int, now int64) {
 	r.logger.Error("upload packet failed, drop it")
 }
 
-func (r *Reactor) createSession(key sd_socket.SockaddrKey) (*sd_session.Session, error) {
-	fd, err := sd_socket.UDPSocket(unix.AF_INET, true, false, false)
+func (r *Reactor) createSession(key sd_socket.SockaddrKey) *sd_session.Session {
+	sess := sd_session.NewSession(key)
+	r.sessions[key] = sess
+	r.sessionWheel.Add(sess, r.nowSec())
+	return sess
+}
+
+func (r *Reactor) getOrCreateSessionFD(sess *sd_session.Session, family int) (int, error) {
+	if fd, ok := sess.GetFDByFamily(family); ok {
+		return fd, nil
+	}
+
+	fd, err := sd_socket.UDPSocket(family, true, false, false)
 	if err != nil {
-		return nil, err
+		return -1, err
 	}
 	if err = r.selector.Add(fd, sd_socket.SelectorEventRead); err != nil {
 		_ = unix.Close(fd)
-		return nil, err
+		return -1, err
 	}
 
-	sess := sd_session.NewSession(key, fd)
-	r.sessions[key] = sess
+	sess.SetFD(family, fd)
 	r.sessionsByFD[fd] = sess
-	r.sessionWheel.Add(sess, r.nowSec())
-	return sess, nil
+	return fd, nil
 }
 
-func (r *Reactor) handleDownload(sess *sd_session.Session) bool {
+func (r *Reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 	for batch := 0; batch < r.recvBatchLimit; batch++ {
-		nPkt, errno := sd_socket.RecvMMsg(sess.GetFD(), r.rxMC)
+		nPkt, errno := sd_socket.RecvMMsg(fd, r.rxMC)
 		if nPkt < 1 || errno != 0 {
 			if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
 				r.logger.Errorf("receive download packets failed: %s", os.NewSyscallError("recvmmsg", errno))
@@ -282,12 +291,14 @@ func (r *Reactor) removeSession(sess *sd_session.Session) {
 
 func (r *Reactor) closeSession(sess *sd_session.Session) {
 	delete(r.sessions, sess.GetKey())
-	delete(r.sessionsByFD, sess.GetFD())
-	if err := r.selector.Del(sess.GetFD()); err != nil {
-		r.logger.Errorf("delete session fd from selector failed: %v", err)
-	}
-	if err := sess.Close(); err != nil {
-		r.logger.Errorf("close session fd failed: %v", err)
+	for _, fd := range sess.GetFDs() {
+		delete(r.sessionsByFD, fd)
+		if err := r.selector.Del(fd); err != nil {
+			r.logger.Errorf("delete session fd from selector failed: %v", err)
+		}
+		if err := unix.Close(fd); err != nil {
+			r.logger.Errorf("close session fd failed: %v", err)
+		}
 	}
 }
 

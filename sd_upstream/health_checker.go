@@ -35,7 +35,7 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 	// init check fd
 	checkFds := make([]int, len(peers))
 	for _, peer := range peers {
-		fd, err := sd_socket.UDPSocket(unix.AF_INET, false, false, false)
+		fd, err := sd_socket.UDPSocket(peer.GetFamily(), false, false, false)
 		if err != nil {
 			logrus.Panicf("init fd for health checker failed: %v", err)
 		}

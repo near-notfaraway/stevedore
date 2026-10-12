@@ -78,7 +78,7 @@
         },
         "Peers": [
           {
-            "IP": "10.0.0.3",
+            "IP": "2001:db8::3",
             "Port": 2345,
             "Weight": 1,
             "Backup": true

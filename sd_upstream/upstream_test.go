@@ -5,6 +5,7 @@ import (
 
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func testPeer(addr string, weight int) *Peer {
@@ -63,6 +64,25 @@ func TestNewUpstream(t *testing.T) {
 			)
 		})
 	})
+}
+
+func TestInitUpstreamPeersSupportsIPv6(t *testing.T) {
+	peers, backup := InitUpstreamPeers(&sd_config.UpstreamConfig{
+		Name: "ipv6",
+		Peers: []*sd_config.PeerConfig{
+			{
+				IP:     "2001:db8::10",
+				Port:   2345,
+				Weight: 1,
+				Backup: true,
+			},
+		},
+	})
+
+	require.Len(t, peers, 1)
+	require.Same(t, peers[0], backup)
+	require.Equal(t, "[2001:db8::10]:2345", peers[0].GetAddr())
+	require.IsType(t, &unix.SockaddrInet6{}, peers[0].sockaddr)
 }
 
 func TestBuildRRListPreservesWeights(t *testing.T) {

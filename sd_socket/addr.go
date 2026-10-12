@@ -129,8 +129,12 @@ func ResolveUDPSockaddr(strAddr string) unix.Sockaddr {
 
 // Converts a name buffer to a Sockaddr
 // Returns nil if conversion fails
-func NameBufferToSockaddr(buf []byte, len uint32) unix.Sockaddr {
-	switch len {
+func NameBufferToSockaddr(buf []byte, nameLen uint32) unix.Sockaddr {
+	if nameLen > uint32(len(buf)) {
+		return nil
+	}
+
+	switch nameLen {
 	case SizeofSockaddrInet4:
 		var ip [4]byte
 		copy(ip[:], buf[4:8])
@@ -184,8 +188,12 @@ func SockaddrToNameBuffer(sa unix.Sockaddr) ([]byte, uint32) {
 
 // Converts a name buffer to a net.UDPAddr
 // Returns nil if conversion fails
-func NameBufferToUDPAddr(buf []byte, len uint32) *net.UDPAddr {
-	switch len {
+func NameBufferToUDPAddr(buf []byte, nameLen uint32) *net.UDPAddr {
+	if nameLen > uint32(len(buf)) {
+		return nil
+	}
+
+	switch nameLen {
 	case SizeofSockaddrInet4:
 		ip := make(net.IP, net.IPv4len)
 		copy(ip, buf[4:8])

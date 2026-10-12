@@ -21,6 +21,27 @@ func TestNewPeer(t *testing.T) {
 	require.True(t, peer.isAlive())
 }
 
+func TestPeerReportsAddressFamily(t *testing.T) {
+	tests := []struct {
+		name   string
+		addr   string
+		family int
+	}{
+		{name: "IPv4", addr: "127.0.0.1:2345", family: unix.AF_INET},
+		{name: "IPv6", addr: "[2001:db8::10]:2345", family: unix.AF_INET6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			peer := NewPeer(0, tt.addr, &sd_config.PeerConfig{Weight: 1})
+			familyPeer, ok := any(peer).(interface{ GetFamily() int })
+
+			require.True(t, ok)
+			require.Equal(t, tt.family, familyPeer.GetFamily())
+		})
+	}
+}
+
 func TestNewPeerRejectsInvalidAddress(t *testing.T) {
 	require.Panics(t, func() {
 		NewPeer(0, "invalid address", &sd_config.PeerConfig{Weight: 1})

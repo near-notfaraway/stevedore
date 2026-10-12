@@ -79,11 +79,22 @@ func TestSockaddrToUDPAddr(t *testing.T) {
 }
 
 func TestResolveUDPSockaddr(t *testing.T) {
-	resolved := ResolveUDPSockaddr("127.0.0.1:9000")
-	require.Equal(t, &unix.SockaddrInet4{
-		Addr: [4]byte{127, 0, 0, 1},
-		Port: 9000,
-	}, resolved)
+	t.Run("IPv4", func(t *testing.T) {
+		resolved := ResolveUDPSockaddr("127.0.0.1:9000")
+		require.Equal(t, &unix.SockaddrInet4{
+			Addr: [4]byte{127, 0, 0, 1},
+			Port: 9000,
+		}, resolved)
+	})
+
+	t.Run("IPv6", func(t *testing.T) {
+		resolved := ResolveUDPSockaddr("[2001:db8::10]:9000")
+		require.Equal(t, &unix.SockaddrInet6{
+			Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10},
+			Port: 9000,
+		}, resolved)
+	})
+
 	require.Nil(t, ResolveUDPSockaddr("not a UDP address"))
 }
 
@@ -107,6 +118,11 @@ func TestNameBufferToSockaddr(t *testing.T) {
 	}, NameBufferToSockaddr(ipv6Buffer, SizeofSockaddrInet6))
 
 	require.Nil(t, NameBufferToSockaddr(make([]byte, SizeofSockaddrInet6), 0))
+}
+
+func TestNameBufferToSockaddrRejectsShortBuffer(t *testing.T) {
+	require.Nil(t, NameBufferToSockaddr(make([]byte, SizeofSockaddrInet4-1), SizeofSockaddrInet4))
+	require.Nil(t, NameBufferToSockaddr(make([]byte, SizeofSockaddrInet6-1), SizeofSockaddrInet6))
 }
 
 func TestNameBufferToUDPAddr(t *testing.T) {
@@ -134,6 +150,11 @@ func TestNameBufferToUDPAddr(t *testing.T) {
 	})
 
 	require.Nil(t, NameBufferToUDPAddr(make([]byte, SizeofSockaddrInet6), 0))
+}
+
+func TestNameBufferToUDPAddrRejectsShortBuffer(t *testing.T) {
+	require.Nil(t, NameBufferToUDPAddr(make([]byte, SizeofSockaddrInet4-1), SizeofSockaddrInet4))
+	require.Nil(t, NameBufferToUDPAddr(make([]byte, SizeofSockaddrInet6-1), SizeofSockaddrInet6))
 }
 
 func TestSockaddrToNameBuffer(t *testing.T) {

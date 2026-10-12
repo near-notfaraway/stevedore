@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPeerGroupRefreshExcludesBackupWhilePrimaryIsHealthy(t *testing.T) {
+func TestPeerGroupRefreshIncludesHealthyBackup(t *testing.T) {
 	primary := &Peer{addr: "127.0.0.1:10001", state: int32(PeerAlive)}
 	backup := &Peer{addr: "127.0.0.1:10002", state: int32(PeerAlive)}
 	group := &PeerGroup{
@@ -16,12 +16,12 @@ func TestPeerGroupRefreshExcludesBackupWhilePrimaryIsHealthy(t *testing.T) {
 
 	group.refresh()
 
-	require.Equal(t, []*Peer{primary}, group.Snapshot().Peers)
+	require.Equal(t, []*Peer{primary, backup}, group.Snapshot().Peers)
 }
 
-func TestPeerGroupRefreshUsesBackupWhenAllPrimariesAreDead(t *testing.T) {
+func TestPeerGroupRefreshForcesBackupWhenAllPeersAreDead(t *testing.T) {
 	primary := &Peer{addr: "127.0.0.1:10001", state: int32(PeerDead)}
-	backup := &Peer{addr: "127.0.0.1:10002", state: int32(PeerAlive)}
+	backup := &Peer{addr: "127.0.0.1:10002", state: int32(PeerDead)}
 	group := &PeerGroup{
 		peers:  []*Peer{primary, backup},
 		backup: backup,
@@ -30,6 +30,7 @@ func TestPeerGroupRefreshUsesBackupWhenAllPrimariesAreDead(t *testing.T) {
 	group.refresh()
 
 	require.Equal(t, []*Peer{backup}, group.Snapshot().Peers)
+	require.Equal(t, PeerTemp, PeerState(backup.state))
 }
 
 func TestPeerGroupRefreshPublishesEmptySnapshotWithoutBackup(t *testing.T) {

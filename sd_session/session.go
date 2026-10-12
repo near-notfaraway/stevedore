@@ -9,7 +9,8 @@ import (
 // 它只允许由所属 Reactor goroutine 访问，因此字段不需要锁或原子操作。
 type Session struct {
 	key       sd_socket.SockaddrKey // 所属 Reactor 中的下游地址键
-	fd        int                   // 与上游通信的 socket fd
+	fds       [2]int                // IPv4、IPv6 上游 socket fd
+	fdSet     [2]bool               // 对应地址族的 fd 是否已创建
 	expiresAt int64                 // 绝对过期时间，单位秒
 	wheelSlot int                   // 当前所在的时间轮槽位
 	wheelPrev *Session              // 桶内前一个 Session
@@ -17,21 +18,49 @@ type Session struct {
 	inWheel   bool                  // 是否已链接到时间轮
 }
 
-func NewSession(key sd_socket.SockaddrKey, fd int) *Session {
-	return &Session{
-		key: key,
-		fd:  fd,
-	}
+func NewSession(key sd_socket.SockaddrKey) *Session {
+	return &Session{key: key}
 }
 
 func (s *Session) GetKey() sd_socket.SockaddrKey {
 	return s.key
 }
 
-func (s *Session) GetFD() int {
-	return s.fd
+func (s *Session) GetFDByFamily(family int) (int, bool) {
+	index, ok := fdFamilyIndex(family)
+	if !ok || !s.fdSet[index] {
+		return 0, false
+	}
+	return s.fds[index], true
 }
 
-func (s *Session) Close() error {
-	return unix.Close(s.fd)
+func (s *Session) SetFD(family, fd int) bool {
+	index, ok := fdFamilyIndex(family)
+	if !ok {
+		return false
+	}
+	s.fds[index] = fd
+	s.fdSet[index] = true
+	return true
+}
+
+func (s *Session) GetFDs() []int {
+	fds := make([]int, 0, len(s.fds))
+	for i, fd := range s.fds {
+		if s.fdSet[i] {
+			fds = append(fds, fd)
+		}
+	}
+	return fds
+}
+
+func fdFamilyIndex(family int) (int, bool) {
+	switch family {
+	case unix.AF_INET:
+		return 0, true
+	case unix.AF_INET6:
+		return 1, true
+	default:
+		return 0, false
+	}
 }

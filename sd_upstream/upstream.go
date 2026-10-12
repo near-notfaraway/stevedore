@@ -2,6 +2,8 @@ package sd_upstream
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/sirupsen/logrus"
@@ -36,11 +38,11 @@ func InitUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup 
 	uniqueMap := make(map[string]struct{})
 
 	for id, peerConfig := range config.Peers {
+		peerAddr := net.JoinHostPort(peerConfig.IP, strconv.Itoa(peerConfig.Port))
 		if peerConfig.Weight < 1 {
-			logrus.Panicf("peer %s:%d has invalid weight %d in upstream %s",
-				peerConfig.IP, peerConfig.Port, peerConfig.Weight, config.Name)
+			logrus.Panicf("peer %s has invalid weight %d in upstream %s",
+				peerAddr, peerConfig.Weight, config.Name)
 		}
-		peerAddr := fmt.Sprintf("%s:%d", peerConfig.IP, peerConfig.Port)
 		if _, dup := uniqueMap[peerAddr]; dup {
 			logrus.Panicf("duplicated peer %s in upstream %s", peerAddr, config.Name)
 		}

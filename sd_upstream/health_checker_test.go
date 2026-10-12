@@ -31,6 +31,23 @@ func TestNewHealthChecker(t *testing.T) {
 	require.Len(t, checker.failedCounter, 1)
 }
 
+func TestNewHealthCheckerUsesPeerAddressFamilies(t *testing.T) {
+	peers := []*Peer{
+		NewPeer(0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1}),
+		NewPeer(1, "[::1]:2345", &sd_config.PeerConfig{Weight: 1}),
+	}
+	checker := NewHealthChecker(&sd_config.HealthCheckerConfig{}, peers)
+	defer closeHealthCheckerFDs(checker)
+
+	ipv4Addr, err := unix.Getsockname(checker.checkFds[0])
+	require.NoError(t, err)
+	require.IsType(t, &unix.SockaddrInet4{}, ipv4Addr)
+
+	ipv6Addr, err := unix.Getsockname(checker.checkFds[1])
+	require.NoError(t, err)
+	require.IsType(t, &unix.SockaddrInet6{}, ipv6Addr)
+}
+
 func TestHealthCheckerCheckRejectsNonPositiveInterval(t *testing.T) {
 	checker := &HealthChecker{}
 
