@@ -1,20 +1,21 @@
 package sd_upstream
 
 import (
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 //------------------------------------------------------------------------------
-// HealthChecker: Used to update peer's health state
+// healthChecker: Used to update peer's health state
 //------------------------------------------------------------------------------
 
-type HealthChecker struct {
+type healthChecker struct {
 	peers             []*Peer       // all peers
 	heartbeatInterval time.Duration // check interval
 	heartbeatTimeout  time.Duration // check timeout
@@ -27,7 +28,7 @@ type HealthChecker struct {
 	changedFlag       int32         // atomic flag indicating a state change in this round
 }
 
-func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *HealthChecker {
+func newHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *healthChecker {
 	// init counter
 	succeedCounter := make([]int, len(peers))
 	failedCounter := make([]int, len(peers))
@@ -45,7 +46,7 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 		checkFds[peer.id] = fd
 	}
 
-	return &HealthChecker{
+	return &healthChecker{
 		peers:             peers,
 		heartbeatInterval: time.Second * time.Duration(config.HeartbeatIntervalSec),
 		heartbeatTimeout:  time.Second * time.Duration(config.HeartbeatTimeoutSec),
@@ -57,7 +58,7 @@ func NewHealthChecker(config *sd_config.HealthCheckerConfig, peers []*Peer) *Hea
 	}
 }
 
-func (c *HealthChecker) Check(changedCh chan<- struct{}) {
+func (c *healthChecker) check(changedCh chan<- struct{}) {
 	// check first time immediately
 	c.checkPeers(changedCh)
 	tick := time.NewTicker(c.heartbeatInterval)
@@ -69,7 +70,7 @@ func (c *HealthChecker) Check(changedCh chan<- struct{}) {
 	}
 }
 
-func (c *HealthChecker) checkPeers(changedCh chan<- struct{}) {
+func (c *healthChecker) checkPeers(changedCh chan<- struct{}) {
 	// check peers one by one concurrently
 	atomic.StoreInt32(&c.changedFlag, 0)
 	wg := &sync.WaitGroup{}
@@ -85,7 +86,7 @@ func (c *HealthChecker) checkPeers(changedCh chan<- struct{}) {
 	}
 }
 
-func (c *HealthChecker) checkOnePeer(peer *Peer, wg *sync.WaitGroup) {
+func (c *healthChecker) checkOnePeer(peer *Peer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	checkBuf := []byte("heartbeat")
 	checkFd := c.checkFds[peer.id]
@@ -118,7 +119,7 @@ func (c *HealthChecker) checkOnePeer(peer *Peer, wg *sync.WaitGroup) {
 	}
 }
 
-func (c *HealthChecker) handleFailedCheck(peer *Peer) bool {
+func (c *healthChecker) handleFailedCheck(peer *Peer) bool {
 	// update counter
 	c.counterMu.Lock()
 	defer c.counterMu.Unlock()
@@ -127,13 +128,13 @@ func (c *HealthChecker) handleFailedCheck(peer *Peer) bool {
 
 	// if peer is alive and exceeds failed times
 	if peer.isAlive() && c.failedCounter[peer.id] >= c.failedTimes {
-		peer.SetState(PeerDead)
+		peer.setState(peerDead)
 		return true
 	}
 	return false
 }
 
-func (c *HealthChecker) handleSuccessCheck(peer *Peer) bool {
+func (c *healthChecker) handleSuccessCheck(peer *Peer) bool {
 	// update counter
 	c.counterMu.Lock()
 	defer c.counterMu.Unlock()
@@ -142,7 +143,7 @@ func (c *HealthChecker) handleSuccessCheck(peer *Peer) bool {
 
 	// if peer is not alive and exceeds succeed times
 	if !peer.isAlive() && c.succeedCounter[peer.id] >= c.successTimes {
-		peer.SetState(PeerAlive)
+		peer.setState(peerAlive)
 		return true
 	}
 	return false

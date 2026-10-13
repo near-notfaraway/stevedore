@@ -7,31 +7,32 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
 func TestMMsgContainersDarwin(t *testing.T) {
 	recv := NewMMsgContainer(1, 1)
-	require.Len(t, recv.Buffers, MinMMsgContainerBatchNum)
-	require.Len(t, recv.Lengths, MinMMsgContainerBatchNum)
-	require.Len(t, recv.Keys, MinMMsgContainerBatchNum)
-	require.Len(t, recv.Buffers[0], MinMMsgContainerMTU)
+	require.Len(t, recv.buffers, minMMsgContainerBatchNum)
+	require.Len(t, recv.lengths, minMMsgContainerBatchNum)
+	require.Len(t, recv.keys, minMMsgContainerBatchNum)
+	require.Len(t, recv.buffers[0], minMMsgContainerMTU)
 
-	recv.Lengths[0] = 7
+	recv.lengths[0] = 7
 	recv.ResetNameLengths()
 	require.Equal(t, uint32(7), recv.GetLengthOfMsg(0))
-	require.Same(t, &recv.Buffers[0][0], &recv.GetBufOfMsg(0)[0])
+	require.Same(t, &recv.buffers[0][0], &recv.GetBufOfMsg(0)[0])
 
 	send := NewSendMMsgContainer(1)
-	require.Len(t, send.Buffers, MinMMsgContainerBatchNum)
-	require.Len(t, send.Keys, MinMMsgContainerBatchNum)
+	require.Len(t, send.buffers, minMMsgContainerBatchNum)
+	require.Len(t, send.keys, minMMsgContainerBatchNum)
 
-	key := SockaddrKey{NameLen: SizeofSockaddrInet4}
+	key := SockaddrKey{nameLen: sizeofSockaddrInet4}
 	payload := []byte("payload")
 	send.Prepare(0, payload, key)
-	require.Equal(t, payload, send.Buffers[0])
-	require.Equal(t, key, send.Keys[0])
+	require.Equal(t, payload, send.buffers[0])
+	require.Equal(t, key, send.keys[0])
 }
 
 func TestRecvMMsgDarwinReceivesBatch(t *testing.T) {
@@ -107,7 +108,7 @@ func TestSendMMsgDarwinValidatesRangeAndMessage(t *testing.T) {
 	}{
 		{start: -1, end: 0},
 		{start: 1, end: 0},
-		{start: 0, end: len(container.Buffers) + 1},
+		{start: 0, end: len(container.buffers) + 1},
 	}
 	for _, tt := range tests {
 		sent, err := SendMMsg(-1, container, tt.start, tt.end)
@@ -120,7 +121,7 @@ func TestSendMMsgDarwinValidatesRangeAndMessage(t *testing.T) {
 	require.Zero(t, sent)
 
 	require.ErrorIs(t, SendMsg(-1, container, -1), unix.EINVAL)
-	require.ErrorIs(t, SendMsg(-1, container, len(container.Buffers)), unix.EINVAL)
+	require.ErrorIs(t, SendMsg(-1, container, len(container.buffers)), unix.EINVAL)
 
 	container.Prepare(0, []byte("invalid address"), SockaddrKey{})
 	require.ErrorIs(t, SendMsg(-1, container, 0), unix.EINVAL)
@@ -141,12 +142,12 @@ func TestAsErrnoDarwin(t *testing.T) {
 func sockaddrKeyFromNameBuffer(t *testing.T, addr unix.Sockaddr) SockaddrKey {
 	t.Helper()
 
-	name, nameLen := SockaddrToNameBuffer(addr)
+	name, nameLen := sockaddrToNameBuffer(addr)
 	require.NotNil(t, name)
 
 	var key SockaddrKey
-	key.NameLen = nameLen
-	copy(key.Name[:], name)
+	key.nameLen = nameLen
+	copy(key.name[:], name)
 	return key
 }
 
@@ -173,4 +174,125 @@ func assertDarwinDatagram(t *testing.T, fd int, expected string) {
 	n, _, err := unix.Recvfrom(fd, buf, 0)
 	require.NoError(t, err)
 	require.Equal(t, expected, string(buf[:n]))
+}
+
+func TestNewMMsgContainerConvey(t *testing.T) {
+	convey.Convey("Test NewMMsgContainer", t, func() {
+		convey.Convey("allocates receive storage", func() {
+			container := NewMMsgContainer(1, 1)
+			convey.So(container.buffers, convey.ShouldHaveLength, minMMsgContainerBatchNum)
+			convey.So(container.buffers[0], convey.ShouldHaveLength, minMMsgContainerMTU)
+		})
+	})
+}
+
+func TestMMsgContainerGetLengthOfMsgConvey(t *testing.T) {
+	convey.Convey("Test MMsgContainer.GetLengthOfMsg", t, func() {
+		convey.Convey("returns recorded length", func() {
+			container := NewMMsgContainer(1, 1)
+			container.lengths[0] = 7
+			convey.So(container.GetLengthOfMsg(0), convey.ShouldEqual, 7)
+		})
+	})
+}
+
+func TestMMsgContainerGetBufOfMsgConvey(t *testing.T) {
+	convey.Convey("Test MMsgContainer.GetBufOfMsg", t, func() {
+		convey.Convey("returns the receive buffer", func() {
+			container := NewMMsgContainer(1, 1)
+			convey.So(container.GetBufOfMsg(0), convey.ShouldResemble, container.buffers[0])
+		})
+	})
+}
+
+func TestMMsgContainerResetNameLengthsConvey(t *testing.T) {
+	convey.Convey("Test MMsgContainer.ResetNameLengths", t, func() {
+		convey.Convey("is a no-op on Darwin", func() {
+			container := NewMMsgContainer(1, 1)
+			container.lengths[0] = 3
+			container.ResetNameLengths()
+			convey.So(container.lengths[0], convey.ShouldEqual, 3)
+		})
+	})
+}
+
+func TestMMsgContainerGetRSockaddrKeyOfMsgConvey(t *testing.T) {
+	convey.Convey("Test MMsgContainer.GetRSockaddrKeyOfMsg", t, func() {
+		convey.Convey("returns the key", func() {
+			container := NewMMsgContainer(1, 1)
+			want := SockaddrKey{nameLen: sizeofSockaddrInet4}
+			container.keys[0] = want
+			convey.So(container.GetRSockaddrKeyOfMsg(0), convey.ShouldResemble, want)
+		})
+	})
+}
+
+func TestNewSendMMsgContainerConvey(t *testing.T) {
+	convey.Convey("Test NewSendMMsgContainer", t, func() {
+		convey.Convey("allocates send storage", func() {
+			container := NewSendMMsgContainer(1)
+			convey.So(container.buffers, convey.ShouldHaveLength, minMMsgContainerBatchNum)
+			convey.So(container.keys, convey.ShouldHaveLength, minMMsgContainerBatchNum)
+		})
+	})
+}
+
+func TestSendMMsgContainerPrepareConvey(t *testing.T) {
+	convey.Convey("Test SendMMsgContainer.Prepare", t, func() {
+		convey.Convey("stores payload and key", func() {
+			container := NewSendMMsgContainer(1)
+			key := SockaddrKey{nameLen: sizeofSockaddrInet4}
+			container.Prepare(0, []byte("payload"), key)
+			convey.So(container.buffers[0], convey.ShouldResemble, []byte("payload"))
+			convey.So(container.keys[0], convey.ShouldResemble, key)
+		})
+	})
+}
+
+func TestRecvMMsgConvey(t *testing.T) {
+	convey.Convey("Test RecvMMsg", t, func() {
+		convey.Convey("returns an invalid descriptor error", func() {
+			count, errno := RecvMMsg(-1, NewMMsgContainer(1, 1))
+			convey.So(count, convey.ShouldEqual, 0)
+			convey.So(errno, convey.ShouldEqual, unix.EBADF)
+		})
+	})
+}
+
+func TestSendMMsgConvey(t *testing.T) {
+	convey.Convey("Test SendMMsg", t, func() {
+		convey.Convey("validates its range", func() {
+			count, err := SendMMsg(-1, NewSendMMsgContainer(1), -1, 0)
+			convey.So(count, convey.ShouldEqual, 0)
+			convey.So(err, convey.ShouldEqual, unix.EINVAL)
+		})
+	})
+}
+
+func TestSendMsgConvey(t *testing.T) {
+	convey.Convey("Test SendMsg", t, func() {
+		convey.Convey("validates its index", func() {
+			err := SendMsg(-1, NewSendMMsgContainer(1), -1)
+			convey.So(err, convey.ShouldEqual, unix.EINVAL)
+		})
+	})
+}
+
+func TestSendPreparedMsgConvey(t *testing.T) {
+	convey.Convey("Test sendPreparedMsg", t, func() {
+		convey.Convey("rejects an empty address key", func() {
+			container := NewSendMMsgContainer(1)
+			container.Prepare(0, []byte("payload"), SockaddrKey{})
+			convey.So(sendPreparedMsg(-1, container, 0), convey.ShouldEqual, unix.EINVAL)
+		})
+	})
+}
+
+func TestAsErrnoConvey(t *testing.T) {
+	convey.Convey("Test asErrno", t, func() {
+		convey.Convey("preserves errno and normalizes other errors", func() {
+			convey.So(asErrno(unix.EINVAL), convey.ShouldEqual, unix.EINVAL)
+			convey.So(asErrno(errors.New("mock")), convey.ShouldEqual, unix.EIO)
+		})
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,7 +19,7 @@ func TestLengthFieldKeyExtractorExtractsBigEndianKey(t *testing.T) {
 	require.NoError(t, err)
 	data := []byte{0xaa, 0x00, 0x03, 0xbb, 0x11, 0x22, 0x33, 0xff}
 
-	key, ok := extractor.Extract(data)
+	key, ok := extractor.extract(data)
 
 	require.True(t, ok)
 	require.Equal(t, []byte{0x11, 0x22, 0x33}, key)
@@ -36,7 +37,7 @@ func TestLengthFieldKeyExtractorExtractsLittleEndianKey(t *testing.T) {
 	require.NoError(t, err)
 	data := []byte{0x03, 0x00, 0xaa, 0x11, 0x22, 0x33}
 
-	key, ok := extractor.Extract(data)
+	key, ok := extractor.extract(data)
 
 	require.True(t, ok)
 	require.Equal(t, []byte{0x11, 0x22, 0x33}, key)
@@ -53,7 +54,7 @@ func TestLengthFieldKeyExtractorReadsFourByteLength(t *testing.T) {
 	require.NoError(t, err)
 	data := []byte{0x00, 0x00, 0x00, 0x03, 0x11, 0x22, 0x33}
 
-	key, ok := extractor.Extract(data)
+	key, ok := extractor.extract(data)
 
 	require.True(t, ok)
 	require.Equal(t, []byte{0x11, 0x22, 0x33}, key)
@@ -78,7 +79,7 @@ func TestLengthFieldKeyExtractorRejectsInvalidPayload(t *testing.T) {
 
 	for name, data := range tests {
 		t.Run(name, func(t *testing.T) {
-			key, ok := extractor.Extract(data)
+			key, ok := extractor.extract(data)
 			require.False(t, ok)
 			require.Nil(t, key)
 		})
@@ -122,7 +123,7 @@ func TestLengthFieldKeyExtractorDoesNotAllocate(t *testing.T) {
 	data := []byte{0x03, 0xaa, 0x11, 0x22, 0x33}
 
 	allocs := testing.AllocsPerRun(1000, func() {
-		_, ok := extractor.Extract(data)
+		_, ok := extractor.extract(data)
 		if !ok {
 			t.Fatal("extract failed")
 		}
@@ -137,4 +138,34 @@ func withLengthFieldKeyConfig(
 ) sd_config.LengthFieldKeyConfig {
 	update(&config)
 	return config
+}
+
+func TestNewLengthFieldKeyExtractorConvey(t *testing.T) {
+	convey.Convey("Test newLengthFieldKeyExtractor", t, func() {
+		convey.Convey("accepts a valid layout", func() {
+			extractor, err := newLengthFieldKeyExtractor(sd_config.LengthFieldKeyConfig{
+				KeyStart:     2,
+				LengthStart:  0,
+				LengthBytes:  1,
+				ByteOrder:    byteOrderBig,
+				MaxKeyLength: 8,
+			})
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(extractor.keyStart, convey.ShouldEqual, 2)
+			convey.So(extractor.lengthEnd, convey.ShouldEqual, 1)
+		})
+	})
+}
+
+func TestLengthFieldKeyExtractorExtractConvey(t *testing.T) {
+	convey.Convey("Test lengthFieldKeyExtractor.extract", t, func() {
+		convey.Convey("reads the declared key", func() {
+			extractor := &lengthFieldKeyExtractor{
+				keyStart: 2, lengthStart: 0, lengthEnd: 1, maxKeyLength: 8,
+			}
+			got, ok := extractor.extract([]byte{2, 0, 0xaa, 0xbb})
+			convey.So(ok, convey.ShouldBeTrue)
+			convey.So(got, convey.ShouldResemble, []byte{0xaa, 0xbb})
+		})
+	})
 }

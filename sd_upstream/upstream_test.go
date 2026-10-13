@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -12,23 +13,23 @@ func testPeer(addr string, weight int) *Peer {
 	return &Peer{
 		addr:   addr,
 		weight: weight,
-		state:  int32(PeerAlive),
+		state:  int32(peerAlive),
 	}
 }
 
 func testPeerGroup(version uint64, peers ...*Peer) *PeerGroup {
 	group := &PeerGroup{}
-	group.snapshot.Store(&PeerSnapshot{
-		Version: version,
-		Peers:   peers,
+	group.snapshotValue.Store(&peerSnapshot{
+		version: version,
+		peers:   peers,
 	})
 	return group
 }
 
 func publishTestSnapshot(group *PeerGroup, version uint64, peers ...*Peer) {
-	group.snapshot.Store(&PeerSnapshot{
-		Version: version,
-		Peers:   peers,
+	group.snapshotValue.Store(&peerSnapshot{
+		version: version,
+		peers:   peers,
 	})
 }
 
@@ -51,7 +52,7 @@ func TestNewUpstream(t *testing.T) {
 			testPeerGroup(1, peer),
 		)
 
-		require.IsType(t, &RRUpstream{}, upstream)
+		require.IsType(t, &rrUpstream{}, upstream)
 	})
 
 	t.Run("chash", func(t *testing.T) {
@@ -63,7 +64,7 @@ func TestNewUpstream(t *testing.T) {
 			testPeerGroup(1, peer),
 		)
 
-		require.IsType(t, &CHashUpstream{}, upstream)
+		require.IsType(t, &cHashUpstream{}, upstream)
 	})
 
 	t.Run("invalid type", func(t *testing.T) {
@@ -77,7 +78,7 @@ func TestNewUpstream(t *testing.T) {
 }
 
 func TestInitUpstreamPeersSupportsIPv6(t *testing.T) {
-	peers, backup := InitUpstreamPeers(&sd_config.UpstreamConfig{
+	peers, backup := initUpstreamPeers(&sd_config.UpstreamConfig{
 		Name: "ipv6",
 		Peers: []*sd_config.PeerConfig{
 			{
@@ -169,7 +170,7 @@ func TestBuildRRListIgnoresNonPositiveWeights(t *testing.T) {
 func TestRRUpstreamSelectPeerUsesWeightedCycle(t *testing.T) {
 	first := testPeer("127.0.0.1:10001", 2)
 	second := testPeer("127.0.0.1:10002", 1)
-	upstream := NewRRUpstream(testPeerGroup(1, first, second))
+	upstream := newRRUpstream(testPeerGroup(1, first, second))
 
 	selected := make([]*Peer, 0, 3)
 	for i := 0; i < 3; i++ {
@@ -181,15 +182,15 @@ func TestRRUpstreamSelectPeerUsesWeightedCycle(t *testing.T) {
 }
 
 func TestRRUpstreamSelectPeerReturnsNilForEmptySnapshot(t *testing.T) {
-	upstream := NewRRUpstream(testPeerGroup(1))
+	upstream := newRRUpstream(testPeerGroup(1))
 
 	require.Nil(t, upstream.SelectPeer(nil))
 }
 
 func TestRRUpstreamSelectPeerWrapsCursor(t *testing.T) {
 	peer := testPeer("127.0.0.1:10001", 1)
-	upstream := NewRRUpstream(testPeerGroup(1, peer))
-	upstream.cur = MaxUint64 - 1
+	upstream := newRRUpstream(testPeerGroup(1, peer))
+	upstream.cur = maxUint64 - 1
 
 	require.Same(t, peer, upstream.SelectPeer(nil))
 	require.Zero(t, upstream.cur)
@@ -199,7 +200,7 @@ func TestRRUpstreamSelectPeerSyncsNewSnapshot(t *testing.T) {
 	first := testPeer("127.0.0.1:10001", 1)
 	second := testPeer("127.0.0.1:10002", 1)
 	group := testPeerGroup(1, first)
-	upstream := NewRRUpstream(group)
+	upstream := newRRUpstream(group)
 	require.Same(t, first, upstream.SelectPeer(nil))
 
 	publishTestSnapshot(group, 2, second)
@@ -223,7 +224,7 @@ func TestNewCHashUpstreamRejectsInvalidKeyBytes(t *testing.T) {
 	for _, keyBytes := range tests {
 		t.Run(keyBytes, func(t *testing.T) {
 			require.Panics(t, func() {
-				NewCHashUpstream(
+				newCHashUpstream(
 					&sd_config.UpstreamConfig{
 						Name:         "test",
 						KeyExtractor: fixedKeyExtractorConfig(keyBytes, ""),
@@ -239,7 +240,7 @@ func TestNewCHashUpstreamRejectsNegativeKeyStart(t *testing.T) {
 	group := testPeerGroup(1, testPeer("127.0.0.1:10001", 1))
 
 	require.Panics(t, func() {
-		NewCHashUpstream(
+		newCHashUpstream(
 			&sd_config.UpstreamConfig{
 				Name:         "test",
 				KeyExtractor: fixedKeyExtractorConfig("-1:2", ""),
@@ -252,7 +253,7 @@ func TestNewCHashUpstreamRejectsNegativeKeyStart(t *testing.T) {
 func TestCHashUpstreamSelectPeerUsesConfiguredPayloadBytes(t *testing.T) {
 	first := testPeer("127.0.0.1:10001", 1)
 	second := testPeer("127.0.0.1:10002", 1)
-	upstream := NewCHashUpstream(
+	upstream := newCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name:         "test",
 			KeyExtractor: fixedKeyExtractorConfig("1:3", ""),
@@ -262,14 +263,14 @@ func TestCHashUpstreamSelectPeerUsesConfiguredPayloadBytes(t *testing.T) {
 
 	selected := upstream.SelectPeer([]byte{0xff, 0x01, 0x02, 0xee})
 
-	require.Same(t, upstream.cHash.SelectPeer([]byte{0x01, 0x02}), selected)
+	require.Same(t, upstream.cHash.selectPeer([]byte{0x01, 0x02}), selected)
 	require.Same(t, selected, upstream.SelectPeer([]byte{0x00, 0x01, 0x02, 0x00}))
 }
 
 func TestCHashUpstreamSelectPeerUsesLengthFieldKey(t *testing.T) {
 	first := testPeer("127.0.0.1:10001", 1)
 	second := testPeer("127.0.0.1:10002", 1)
-	upstream := NewCHashUpstream(
+	upstream := newCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name: "test",
 			KeyExtractor: &sd_config.KeyExtractorConfig{
@@ -287,7 +288,7 @@ func TestCHashUpstreamSelectPeerUsesLengthFieldKey(t *testing.T) {
 	)
 	payload := []byte{0x03, 0xaa, 0x11, 0x22, 0x33}
 
-	require.Same(t, upstream.cHash.SelectPeer([]byte{0x11, 0x22, 0x33}), upstream.SelectPeer(payload))
+	require.Same(t, upstream.cHash.selectPeer([]byte{0x11, 0x22, 0x33}), upstream.SelectPeer(payload))
 }
 
 func TestNewCHashUpstreamRejectsMismatchedKeyExtractorConfig(t *testing.T) {
@@ -314,7 +315,7 @@ func TestNewCHashUpstreamRejectsMismatchedKeyExtractorConfig(t *testing.T) {
 	for name, keyConfig := range tests {
 		t.Run(name, func(t *testing.T) {
 			require.Panics(t, func() {
-				NewCHashUpstream(
+				newCHashUpstream(
 					&sd_config.UpstreamConfig{
 						Name:         "test",
 						KeyExtractor: keyConfig,
@@ -328,7 +329,7 @@ func TestNewCHashUpstreamRejectsMismatchedKeyExtractorConfig(t *testing.T) {
 
 func TestNewCHashUpstreamRequiresKeyExtractor(t *testing.T) {
 	require.Panics(t, func() {
-		NewCHashUpstream(
+		newCHashUpstream(
 			&sd_config.UpstreamConfig{
 				Name: "test",
 			},
@@ -352,7 +353,7 @@ func TestNewCHashUpstreamRejectsInvalidKeyExtractor(t *testing.T) {
 	for name, keyConfig := range tests {
 		t.Run(name, func(t *testing.T) {
 			require.Panics(t, func() {
-				NewCHashUpstream(
+				newCHashUpstream(
 					&sd_config.UpstreamConfig{Name: "test", KeyExtractor: keyConfig},
 					testPeerGroup(1, testPeer("127.0.0.1:10001", 1)),
 				)
@@ -362,7 +363,7 @@ func TestNewCHashUpstreamRejectsInvalidKeyExtractor(t *testing.T) {
 }
 
 func TestCHashUpstreamSelectPeerReturnsNilForShortPayload(t *testing.T) {
-	upstream := NewCHashUpstream(
+	upstream := newCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name:         "test",
 			KeyExtractor: fixedKeyExtractorConfig("1:3", ""),
@@ -375,11 +376,11 @@ func TestCHashUpstreamSelectPeerReturnsNilForShortPayload(t *testing.T) {
 
 func TestCHashUpstreamSelectPeerFallsBackToRRForShortPayload(t *testing.T) {
 	peer := testPeer("127.0.0.1:10001", 1)
-	upstream := NewCHashUpstream(
+	upstream := newCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name:             "test",
 			KeyExtractor:     fixedKeyExtractorConfig("1:3", ""),
-			InvalidKeyPolicy: InvalidKeyPolicyRR,
+			InvalidKeyPolicy: invalidKeyPolicyRR,
 		},
 		testPeerGroup(1, peer),
 	)
@@ -389,7 +390,7 @@ func TestCHashUpstreamSelectPeerFallsBackToRRForShortPayload(t *testing.T) {
 
 func TestNewCHashUpstreamRejectsInvalidKeyPolicy(t *testing.T) {
 	require.Panics(t, func() {
-		NewCHashUpstream(
+		newCHashUpstream(
 			&sd_config.UpstreamConfig{
 				Name:             "test",
 				KeyExtractor:     fixedKeyExtractorConfig("0:1", ""),
@@ -401,7 +402,7 @@ func TestNewCHashUpstreamRejectsInvalidKeyPolicy(t *testing.T) {
 }
 
 func TestCHashUpstreamSelectPeerReturnsNilForEmptySnapshot(t *testing.T) {
-	upstream := NewCHashUpstream(
+	upstream := newCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name:         "test",
 			KeyExtractor: fixedKeyExtractorConfig("0:1", ""),
@@ -416,7 +417,7 @@ func TestCHashUpstreamSelectPeerSyncsNewSnapshot(t *testing.T) {
 	first := testPeer("127.0.0.1:10001", 1)
 	second := testPeer("127.0.0.1:10002", 1)
 	group := testPeerGroup(1, first)
-	upstream := NewCHashUpstream(
+	upstream := newCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name:         "test",
 			KeyExtractor: fixedKeyExtractorConfig("0:1", ""),
@@ -439,4 +440,158 @@ func countPeer(peers []*Peer, target *Peer) int {
 		}
 	}
 	return count
+}
+
+func TestNewUpstreamConvey(t *testing.T) {
+	convey.Convey("Test NewUpstream", t, func() {
+		convey.Convey("selects the round-robin implementation", func() {
+			group := testPeerGroup(1, testPeer("127.0.0.1:10001", 1))
+			got := NewUpstream(&sd_config.UpstreamConfig{Type: UpstreamTypeRR}, group)
+			convey.So(got, convey.ShouldHaveSameTypeAs, &rrUpstream{})
+		})
+	})
+}
+
+func TestInitUpstreamPeersConvey(t *testing.T) {
+	convey.Convey("Test initUpstreamPeers", t, func() {
+		convey.Convey("builds primary and backup peers", func() {
+			peers, backup := initUpstreamPeers(&sd_config.UpstreamConfig{
+				Name: "test",
+				Peers: []*sd_config.PeerConfig{
+					{IP: "127.0.0.1", Port: 10001, Weight: 1},
+					{IP: "127.0.0.1", Port: 10002, Weight: 1, Backup: true},
+				},
+			})
+			convey.So(peers, convey.ShouldHaveLength, 2)
+			convey.So(backup, convey.ShouldEqual, peers[1])
+		})
+	})
+}
+
+func TestNewRRUpstreamConvey(t *testing.T) {
+	convey.Convey("Test newRRUpstream", t, func() {
+		convey.Convey("synchronizes the initial snapshot", func() {
+			peer := testPeer("127.0.0.1:10001", 1)
+			upstream := newRRUpstream(testPeerGroup(2, peer))
+			convey.So(upstream.snapshotVersion, convey.ShouldEqual, 2)
+			convey.So(upstream.rrList, convey.ShouldResemble, []*Peer{peer})
+		})
+	})
+}
+
+func TestRrUpstreamSelectPeerConvey(t *testing.T) {
+	convey.Convey("Test rrUpstream.SelectPeer", t, func() {
+		convey.Convey("advances through the list", func() {
+			first := testPeer("127.0.0.1:10001", 1)
+			second := testPeer("127.0.0.1:10002", 1)
+			upstream := newRRUpstream(testPeerGroup(1, first, second))
+			convey.So(upstream.SelectPeer(nil), convey.ShouldEqual, first)
+			convey.So(upstream.SelectPeer(nil), convey.ShouldEqual, second)
+		})
+	})
+}
+
+func TestRrUpstreamMarkPeerDeadConvey(t *testing.T) {
+	convey.Convey("Test rrUpstream.MarkPeerDead", t, func() {
+		convey.Convey("updates the group", func() {
+			peer := testPeer("127.0.0.1:10001", 1)
+			group := &PeerGroup{peers: []*Peer{peer}}
+			group.refresh()
+			newRRUpstream(group).MarkPeerDead(peer)
+			convey.So(peer.isAlive(), convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestRrUpstreamSyncSnapshotConvey(t *testing.T) {
+	convey.Convey("Test rrUpstream.syncSnapshot", t, func() {
+		convey.Convey("rebuilds on version change", func() {
+			first := testPeer("127.0.0.1:10001", 1)
+			group := testPeerGroup(1, first)
+			upstream := newRRUpstream(group)
+			second := testPeer("127.0.0.1:10002", 1)
+			publishTestSnapshot(group, 2, second)
+			upstream.syncSnapshot()
+			convey.So(upstream.snapshotVersion, convey.ShouldEqual, 2)
+			convey.So(upstream.rrList, convey.ShouldResemble, []*Peer{second})
+		})
+	})
+}
+
+func TestBuildRRListConvey(t *testing.T) {
+	convey.Convey("Test buildRRList", t, func() {
+		convey.Convey("expands normalized weights", func() {
+			first := testPeer("127.0.0.1:10001", 2)
+			second := testPeer("127.0.0.1:10002", 1)
+			got := buildRRList([]*Peer{first, second})
+			convey.So(got, convey.ShouldHaveLength, 3)
+			convey.So(countPeer(got, first), convey.ShouldEqual, 2)
+		})
+	})
+}
+
+func TestGreatestCommonDivisorConvey(t *testing.T) {
+	convey.Convey("Test greatestCommonDivisor", t, func() {
+		convey.Convey("returns the common divisor", func() {
+			convey.So(greatestCommonDivisor(18, 12), convey.ShouldEqual, 6)
+		})
+	})
+}
+
+func TestNewCHashUpstreamConvey(t *testing.T) {
+	convey.Convey("Test newCHashUpstream", t, func() {
+		convey.Convey("creates a fixed-key implementation", func() {
+			upstream := newCHashUpstream(&sd_config.UpstreamConfig{
+				Name: "hash",
+				KeyExtractor: &sd_config.KeyExtractorConfig{
+					Type:  keyExtractorTypeFixed,
+					Fixed: &sd_config.FixedKeyConfig{KeyBytes: "0:1"},
+				},
+			}, testPeerGroup(1, testPeer("127.0.0.1:10001", 1)))
+			convey.So(upstream.cHash, convey.ShouldNotBeNil)
+			convey.So(upstream.key, convey.ShouldHaveSameTypeAs, &fixedKeyExtractor{})
+		})
+	})
+}
+
+func TestCHashUpstreamSelectPeerConvey(t *testing.T) {
+	convey.Convey("Test cHashUpstream.SelectPeer", t, func() {
+		convey.Convey("hashes a valid key", func() {
+			peer := testPeer("127.0.0.1:10001", 1)
+			upstream := newCHashUpstream(&sd_config.UpstreamConfig{
+				Name: "hash",
+				KeyExtractor: &sd_config.KeyExtractorConfig{
+					Type:  keyExtractorTypeFixed,
+					Fixed: &sd_config.FixedKeyConfig{KeyBytes: "0:1"},
+				},
+			}, testPeerGroup(1, peer))
+			convey.So(upstream.SelectPeer([]byte{1}), convey.ShouldEqual, peer)
+		})
+	})
+}
+
+func TestCHashUpstreamMarkPeerDeadConvey(t *testing.T) {
+	convey.Convey("Test cHashUpstream.MarkPeerDead", t, func() {
+		convey.Convey("updates the group", func() {
+			peer := testPeer("127.0.0.1:10001", 1)
+			group := &PeerGroup{peers: []*Peer{peer}}
+			group.refresh()
+			upstream := &cHashUpstream{group: group}
+			upstream.MarkPeerDead(peer)
+			convey.So(peer.isAlive(), convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestCHashUpstreamSyncSnapshotConvey(t *testing.T) {
+	convey.Convey("Test cHashUpstream.syncSnapshot", t, func() {
+		convey.Convey("updates the lookup table", func() {
+			peer := testPeer("127.0.0.1:10001", 1)
+			group := testPeerGroup(2, peer)
+			upstream := &cHashUpstream{group: group, cHash: newConsistentHash(nil)}
+			upstream.syncSnapshot()
+			convey.So(upstream.snapshotVersion, convey.ShouldEqual, 2)
+			convey.So(upstream.cHash.selectPeer([]byte("key")), convey.ShouldEqual, peer)
+		})
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -123,5 +124,59 @@ func TestManagerMarkPeerDeadIgnoresUnknownUpstream(t *testing.T) {
 
 	require.NotPanics(t, func() {
 		manager.MarkPeerDead("missing", &Peer{})
+	})
+}
+
+func TestNewManagerConvey(t *testing.T) {
+	convey.Convey("Test NewManager", t, func() {
+		convey.Convey("sorts upstream names", func() {
+			manager := NewManager(map[string]Upstream{
+				"second": &managerStubUpstream{},
+				"first":  &managerStubUpstream{},
+			}, true)
+			convey.So(manager.stats.names, convey.ShouldResemble, []string{"first", "second"})
+		})
+	})
+}
+
+func TestManagerSelectPeerConvey(t *testing.T) {
+	convey.Convey("Test Manager.SelectPeer", t, func() {
+		convey.Convey("delegates and records a selection", func() {
+			peer := &Peer{}
+			manager := NewManager(map[string]Upstream{
+				"default": &managerStubUpstream{peer: peer},
+			}, true)
+			got, ok := manager.SelectPeer("default", nil)
+			convey.So(ok, convey.ShouldBeTrue)
+			convey.So(got, convey.ShouldEqual, peer)
+			convey.So(manager.Stats()[0].Selections, convey.ShouldEqual, 1)
+		})
+	})
+}
+
+func TestManagerMarkPeerDeadConvey(t *testing.T) {
+	convey.Convey("Test Manager.MarkPeerDead", t, func() {
+		convey.Convey("delegates and records failure", func() {
+			peer := &Peer{}
+			stub := &managerStubUpstream{}
+			manager := NewManager(map[string]Upstream{"default": stub}, true)
+			manager.MarkPeerDead("default", peer)
+			convey.So(stub.deadPeer, convey.ShouldEqual, peer)
+			convey.So(manager.Stats()[0].PeerFailures, convey.ShouldEqual, 1)
+		})
+	})
+}
+
+func TestManagerStatsConvey(t *testing.T) {
+	convey.Convey("Test Manager.Stats", t, func() {
+		convey.Convey("snapshots counters", func() {
+			manager := NewManager(map[string]Upstream{
+				"default": &managerStubUpstream{peer: &Peer{}},
+			}, true)
+			manager.SelectPeer("default", nil)
+			convey.So(manager.Stats(), convey.ShouldResemble, []Stats{{
+				Name: "default", Selections: 1,
+			}})
+		})
 	})
 }

@@ -11,25 +11,6 @@ type Manager struct {
 	stats       *managerStats
 }
 
-type managerStats struct {
-	enabled bool
-	names   []string
-	stats   []upstreamStats
-}
-
-type upstreamStats struct {
-	selections        atomic.Uint64
-	selectionFailures atomic.Uint64
-	peerFailures      atomic.Uint64
-}
-
-type Stats struct {
-	Name              string
-	Selections        uint64
-	SelectionFailures uint64
-	PeerFailures      uint64
-}
-
 func NewManager(upstreamsByName map[string]Upstream, statsEnabled bool) *Manager {
 	names := make([]string, 0, len(upstreamsByName))
 	for name := range upstreamsByName {
@@ -93,4 +74,23 @@ func (m *Manager) Stats() []Stats {
 		}
 	}
 	return stats
+}
+
+type managerStats struct {
+	enabled bool
+	names   []string
+	stats   []upstreamStats
+}
+
+type upstreamStats struct {
+	selections        atomic.Uint64
+	selectionFailures atomic.Uint64
+	peerFailures      atomic.Uint64
+}
+
+type Stats struct {
+	Name              string
+	Selections        uint64
+	SelectionFailures uint64
+	PeerFailures      uint64
 }

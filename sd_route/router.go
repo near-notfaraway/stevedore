@@ -16,46 +16,6 @@ type Router struct {
 	stats           *routerStats
 }
 
-type routerStats struct {
-	enabled       bool
-	routeNames    []string
-	routeMatches  []atomic.Uint64
-	defaultRoutes atomic.Uint64
-	shortPayloads atomic.Uint64
-	drops         atomic.Uint64
-}
-
-type Stats struct {
-	Routes        []RouteStats
-	DefaultRoutes uint64
-	ShortPayloads uint64
-	Drops         uint64
-}
-
-type RouteStats struct {
-	ID      int
-	Name    string
-	Matches uint64
-}
-
-func (r *Router) Stats() Stats {
-	stats := r.stats
-	routes := make([]RouteStats, len(stats.routeNames))
-	for i, name := range stats.routeNames {
-		routes[i] = RouteStats{
-			ID:      i,
-			Name:    name,
-			Matches: stats.routeMatches[i].Load(),
-		}
-	}
-	return Stats{
-		Routes:        routes,
-		DefaultRoutes: stats.defaultRoutes.Load(),
-		ShortPayloads: stats.shortPayloads.Load(),
-		Drops:         stats.drops.Load(),
-	}
-}
-
 func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig, statsEnabled bool) *Router {
 	routes := make([]*route, 0, len(configs))
 	names := make(map[string]struct{}, len(configs))
@@ -85,15 +45,21 @@ func (r *Router) Clone() *Router {
 	}
 }
 
-func newRouterStats(routes []*route, enabled bool) *routerStats {
-	names := make([]string, len(routes))
-	for i, route := range routes {
-		names[i] = route.name
+func (r *Router) Stats() Stats {
+	stats := r.stats
+	routes := make([]RouteStats, len(stats.routeNames))
+	for i, name := range stats.routeNames {
+		routes[i] = RouteStats{
+			ID:      i,
+			Name:    name,
+			Matches: stats.routeMatches[i].Load(),
+		}
 	}
-	return &routerStats{
-		enabled:      enabled,
-		routeNames:   names,
-		routeMatches: make([]atomic.Uint64, len(routes)),
+	return Stats{
+		Routes:        routes,
+		DefaultRoutes: stats.defaultRoutes.Load(),
+		ShortPayloads: stats.shortPayloads.Load(),
+		Drops:         stats.drops.Load(),
 	}
 }
 
@@ -132,6 +98,40 @@ func (r *Router) routeWithStats(data []byte) string {
 		r.stats.drops.Add(1)
 	}
 	return r.defaultUpstream
+}
+
+type routerStats struct {
+	enabled       bool
+	routeNames    []string
+	routeMatches  []atomic.Uint64
+	defaultRoutes atomic.Uint64
+	shortPayloads atomic.Uint64
+	drops         atomic.Uint64
+}
+
+func newRouterStats(routes []*route, enabled bool) *routerStats {
+	names := make([]string, len(routes))
+	for i, route := range routes {
+		names[i] = route.name
+	}
+	return &routerStats{
+		enabled:      enabled,
+		routeNames:   names,
+		routeMatches: make([]atomic.Uint64, len(routes)),
+	}
+}
+
+type Stats struct {
+	Routes        []RouteStats
+	DefaultRoutes uint64
+	ShortPayloads uint64
+	Drops         uint64
+}
+
+type RouteStats struct {
+	ID      int
+	Name    string
+	Matches uint64
 }
 
 type route struct {

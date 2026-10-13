@@ -97,6 +97,55 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
   `sd_config/config.example.json` 和 README 中的相关示例，并确保非目标
   环境不受影响。
 
+## Go 编码规范
+
+- 文件级 `const` 和 `var` 声明原则上放在 import 之后、其他声明之前。
+- 如果 `const` 或 `var` 的声明依赖当前文件定义的自定义类型，必须先定义该
+  类型，再定义依赖它的 `const` 或 `var`。例如枚举类型应位于对应的
+  `iota` 常量组之前。
+- 每个 struct 定义后应紧跟该 struct 的构造函数和全部方法。多个 struct
+  按“struct、构造函数、方法”的完整代码块依次排列。
+- 与 struct 无关的普通辅助函数放在相关 struct 代码块之后，避免打断
+  struct、构造函数和方法的连续性。
+- 仅在确实需要跨包调用时导出 Struct、Interface、Func、Method、Const、
+  Var 和字段；只在包内使用的声明统一使用小写名称。
+- 私有 struct 实现跨包公开接口时，接口要求的方法必须保持导出名称，以
+  满足 Go 的跨包接口实现规则。
+- 平台对应实现（Linux/Darwin）应保持命名、声明顺序和控制流结构对称。
+
+## 单元测试规范
+
+- 每个生产函数或方法必须有一个独立的 Go 测试函数，不得将多个生产函数的
+  测试集中到 `TestAll...` 等聚合测试中。
+- 测试必须放在被测源文件对应的测试文件中：`xxx.go` 对应
+  `xxx_test.go`，平台文件 `xxx_linux.go`、`xxx_darwin.go` 分别对应
+  `xxx_linux_test.go`、`xxx_darwin_test.go`。
+- 每个测试函数采用可嵌套的 GoConvey 结构：
+
+  ```go
+  func TestFunctionConvey(t *testing.T) {
+      convey.Convey("Test Function", t, func() {
+          convey.Convey("success", func() {
+              // Arrange, Act, Assert
+          })
+      })
+  }
+  ```
+
+- 一个生产函数对应一个根 Convey；成功、边界和错误路径使用该根 Convey
+  下的子 Convey 表达。禁止用一个根 Convey 包裹多个生产函数的测试。
+- 外部依赖、系统调用、文件、网络及难以稳定构造的行为使用 gomonkey
+  隔离；纯函数和可确定构造的状态逻辑直接测试，不为使用 Mock 而 Mock。
+- gomonkey 测试必须使用禁用优化和内联的参数执行：
+
+  ```bash
+  go test -v -gcflags="all=-l -N" ./path/to/pkg
+  ```
+
+- 不删除或破坏无关的原有测试。新增测试应覆盖有效行为，并使用明确断言，
+  禁止空壳测试或只验证“不 panic”而不验证结果。
+- 平台测试需要在本机执行对应平台用例，并至少对另一平台执行交叉编译测试。
+
 ## 构建与测试
 
 在 macOS 中：

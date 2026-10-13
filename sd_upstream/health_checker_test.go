@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
 func TestNewHealthChecker(t *testing.T) {
 	peer := NewPeer(0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1})
-	checker := NewHealthChecker(&sd_config.HealthCheckerConfig{
+	checker := newHealthChecker(&sd_config.HealthCheckerConfig{
 		HeartbeatIntervalSec: 2,
 		HeartbeatTimeoutSec:  3,
 		SuccessTimes:         4,
@@ -36,7 +37,7 @@ func TestNewHealthCheckerUsesPeerAddressFamilies(t *testing.T) {
 		NewPeer(0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1}),
 		NewPeer(1, "[::1]:2345", &sd_config.PeerConfig{Weight: 1}),
 	}
-	checker := NewHealthChecker(&sd_config.HealthCheckerConfig{}, peers)
+	checker := newHealthChecker(&sd_config.HealthCheckerConfig{}, peers)
 	defer closeHealthCheckerFDs(checker)
 
 	ipv4Addr, err := unix.Getsockname(checker.checkFds[0])
@@ -49,16 +50,16 @@ func TestNewHealthCheckerUsesPeerAddressFamilies(t *testing.T) {
 }
 
 func TestHealthCheckerCheckRejectsNonPositiveInterval(t *testing.T) {
-	checker := &HealthChecker{}
+	checker := &healthChecker{}
 
 	require.Panics(t, func() {
-		checker.Check(make(chan struct{}, 1))
+		checker.check(make(chan struct{}, 1))
 	})
 }
 
 func TestHealthCheckerHandleFailedCheck(t *testing.T) {
-	peer := &Peer{id: 0, state: int32(PeerAlive)}
-	checker := &HealthChecker{
+	peer := &Peer{id: 0, state: int32(peerAlive)}
+	checker := &healthChecker{
 		succeedCounter: []int{1},
 		failedCounter:  []int{0},
 		failedTimes:    2,
@@ -75,8 +76,8 @@ func TestHealthCheckerHandleFailedCheck(t *testing.T) {
 }
 
 func TestHealthCheckerHandleSuccessCheck(t *testing.T) {
-	peer := &Peer{id: 0, state: int32(PeerDead)}
-	checker := &HealthChecker{
+	peer := &Peer{id: 0, state: int32(peerDead)}
+	checker := &healthChecker{
 		succeedCounter: []int{0},
 		failedCounter:  []int{1},
 		successTimes:   2,
@@ -93,8 +94,8 @@ func TestHealthCheckerHandleSuccessCheck(t *testing.T) {
 }
 
 func TestHealthCheckerCheckOnePeerHandlesSendFailure(t *testing.T) {
-	peer := &Peer{id: 0, state: int32(PeerAlive)}
-	checker := &HealthChecker{
+	peer := &Peer{id: 0, state: int32(peerAlive)}
+	checker := &healthChecker{
 		peers:          []*Peer{peer},
 		checkFds:       []int{-1},
 		succeedCounter: []int{0},
@@ -117,8 +118,8 @@ func TestHealthCheckerCheckOnePeerHandlesSuccess(t *testing.T) {
 	defer receiver.Close()
 
 	peer := NewPeer(0, receiver.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
-	peer.SetState(PeerDead)
-	checker := NewHealthChecker(&sd_config.HealthCheckerConfig{
+	peer.setState(peerDead)
+	checker := newHealthChecker(&sd_config.HealthCheckerConfig{
 		HeartbeatTimeoutSec: 0,
 		SuccessTimes:        1,
 		FailedTimes:         1,
@@ -135,8 +136,8 @@ func TestHealthCheckerCheckOnePeerHandlesSuccess(t *testing.T) {
 }
 
 func TestHealthCheckerCheckPeersNotifiesStateChange(t *testing.T) {
-	peer := &Peer{id: 0, state: int32(PeerAlive)}
-	checker := &HealthChecker{
+	peer := &Peer{id: 0, state: int32(peerAlive)}
+	checker := &healthChecker{
 		peers:          []*Peer{peer},
 		checkFds:       []int{-1},
 		succeedCounter: []int{0},
@@ -151,8 +152,88 @@ func TestHealthCheckerCheckPeersNotifiesStateChange(t *testing.T) {
 	require.Len(t, changedCh, 1)
 }
 
-func closeHealthCheckerFDs(checker *HealthChecker) {
+func closeHealthCheckerFDs(checker *healthChecker) {
 	for _, fd := range checker.checkFds {
 		_ = unix.Close(fd)
 	}
+}
+
+func TestNewHealthCheckerConvey(t *testing.T) {
+	convey.Convey("Test newHealthChecker", t, func() {
+		convey.Convey("initializes counters without peers", func() {
+			checker := newHealthChecker(&sd_config.HealthCheckerConfig{
+				HeartbeatIntervalSec: 2,
+				HeartbeatTimeoutSec:  3,
+			}, nil)
+			convey.So(checker.heartbeatInterval, convey.ShouldEqual, 2*time.Second)
+			convey.So(checker.checkFds, convey.ShouldBeEmpty)
+		})
+	})
+}
+
+func TestHealthCheckerCheckConvey(t *testing.T) {
+	convey.Convey("Test healthChecker.check", t, func() {
+		convey.Convey("rejects a non-positive interval", func() {
+			convey.So(func() {
+				(&healthChecker{}).check(make(chan struct{}, 1))
+			}, convey.ShouldPanic)
+		})
+	})
+}
+
+func TestHealthCheckerCheckPeersConvey(t *testing.T) {
+	convey.Convey("Test healthChecker.checkPeers", t, func() {
+		convey.Convey("leaves the channel empty without peers", func() {
+			checker := &healthChecker{}
+			changed := make(chan struct{}, 1)
+			checker.checkPeers(changed)
+			convey.So(changed, convey.ShouldHaveLength, 0)
+		})
+	})
+}
+
+func TestHealthCheckerCheckOnePeerConvey(t *testing.T) {
+	convey.Convey("Test healthChecker.checkOnePeer", t, func() {
+		convey.Convey("handles send failure", func() {
+			peer := &Peer{id: 0, state: int32(peerAlive)}
+			checker := &healthChecker{
+				checkFds:       []int{-1},
+				succeedCounter: []int{0},
+				failedCounter:  []int{0},
+				failedTimes:    1,
+			}
+			var wg sync.WaitGroup
+			wg.Add(1)
+			checker.checkOnePeer(peer, &wg)
+			wg.Wait()
+			convey.So(peer.isAlive(), convey.ShouldBeFalse)
+			convey.So(checker.changedFlag, convey.ShouldEqual, 1)
+		})
+	})
+}
+
+func TestHealthCheckerHandleFailedCheckConvey(t *testing.T) {
+	convey.Convey("Test healthChecker.handleFailedCheck", t, func() {
+		convey.Convey("transitions after threshold", func() {
+			peer := &Peer{id: 0, state: int32(peerAlive)}
+			checker := &healthChecker{
+				succeedCounter: []int{1}, failedCounter: []int{0}, failedTimes: 1,
+			}
+			convey.So(checker.handleFailedCheck(peer), convey.ShouldBeTrue)
+			convey.So(peer.isAlive(), convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestHealthCheckerHandleSuccessCheckConvey(t *testing.T) {
+	convey.Convey("Test healthChecker.handleSuccessCheck", t, func() {
+		convey.Convey("revives after threshold", func() {
+			peer := &Peer{id: 0, state: int32(peerDead)}
+			checker := &healthChecker{
+				succeedCounter: []int{0}, failedCounter: []int{1}, successTimes: 1,
+			}
+			convey.So(checker.handleSuccessCheck(peer), convey.ShouldBeTrue)
+			convey.So(peer.isAlive(), convey.ShouldBeTrue)
+		})
+	})
 }

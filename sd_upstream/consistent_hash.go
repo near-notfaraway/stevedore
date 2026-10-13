@@ -2,37 +2,27 @@ package sd_upstream
 
 import "github.com/pkg/errors"
 
-func time33HashValue(bytes []byte, layer int) uint {
-	var hashValue uint
-	for l := 0; l < layer; l++ {
-		for i := 0; i < len(bytes); i++ {
-			hashValue = hashValue*33 + uint(bytes[i])
-		}
-	}
-	return hashValue
-}
+const lookupTableSize = 65537
 
-const LookupTableSize = 65537
+var noPeerError = errors.New("no one peer in chash")
 
-var NoOnePeerError = errors.New("no one peer in chash")
-
-type ConsistentHash struct {
+type consistentHash struct {
 	lookupTable []*Peer
 }
 
-func NewConsistentHash(peers []*Peer) *ConsistentHash {
-	c := &ConsistentHash{}
-	_ = c.UpdateLookupTable(peers)
+func newConsistentHash(peers []*Peer) *consistentHash {
+	c := &consistentHash{}
+	_ = c.updateLookupTable(peers)
 	return c
 }
 
-func (c *ConsistentHash) UpdateLookupTable(peers []*Peer) error {
+func (c *consistentHash) updateLookupTable(peers []*Peer) error {
 	if len(peers) == 0 {
 		c.lookupTable = nil
-		return NoOnePeerError
+		return noPeerError
 	}
 
-	c.lookupTable = make([]*Peer, LookupTableSize)
+	c.lookupTable = make([]*Peer, lookupTableSize)
 	if len(peers) == 1 {
 		for i := range c.lookupTable {
 			c.lookupTable[i] = peers[0]
@@ -84,10 +74,20 @@ func (c *ConsistentHash) UpdateLookupTable(peers []*Peer) error {
 	}
 }
 
-func (c *ConsistentHash) SelectPeer(key []byte) *Peer {
+func (c *consistentHash) selectPeer(key []byte) *Peer {
 	if len(c.lookupTable) == 0 {
 		return nil
 	}
 	pos := time33HashValue(key, 1) % uint(len(c.lookupTable))
 	return c.lookupTable[pos]
+}
+
+func time33HashValue(bytes []byte, layer int) uint {
+	var hashValue uint
+	for l := 0; l < layer; l++ {
+		for i := 0; i < len(bytes); i++ {
+			hashValue = hashValue*33 + uint(bytes[i])
+		}
+	}
+	return hashValue
 }

@@ -9,13 +9,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type PeerState int32
+type peerState int32
 
 const (
-	_ PeerState = iota
-	PeerAlive
-	PeerTemp
-	PeerDead
+	_ peerState = iota
+	peerAlive
+	peerTemp
+	peerDead
 )
 
 //------------------------------------------------------------------------------
@@ -28,7 +28,7 @@ type Peer struct {
 	sockaddr unix.Sockaddr // sockaddr for send packet
 	family   int           // sockaddr family
 	weight   int           // selected ratio
-	state    int32         // atomic PeerState
+	state    int32         // atomic peerState
 }
 
 func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
@@ -48,7 +48,7 @@ func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
 		sockaddr: sockaddr,
 		family:   family,
 		weight:   config.Weight,
-		state:    int32(PeerAlive),
+		state:    int32(peerAlive),
 	}
 }
 
@@ -56,12 +56,12 @@ func (p *Peer) Send(fd int, data []byte) error {
 	return sd_socket.SendTo(fd, data, 0, p.sockaddr)
 }
 
-func (p *Peer) SetState(state PeerState) {
+func (p *Peer) setState(state peerState) {
 	atomic.StoreInt32(&p.state, int32(state))
 }
 
 func (p *Peer) isAlive() bool {
-	return PeerState(atomic.LoadInt32(&p.state)) == PeerAlive
+	return peerState(atomic.LoadInt32(&p.state)) == peerAlive
 }
 
 func (p *Peer) GetAddr() string {

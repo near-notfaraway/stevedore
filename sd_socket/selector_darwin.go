@@ -14,7 +14,7 @@ import (
 
 const kqueueWakeIdent = 1
 
-type Kqueue struct {
+type kqueue struct {
 	fd         int
 	evs        []unix.Kevent_t
 	polled     []PolledEvent
@@ -43,7 +43,7 @@ func NewSelector(eventSize int, et bool) (Selector, error) {
 		return nil, os.NewSyscallError("kevent add wake", err)
 	}
 
-	return &Kqueue{
+	return &kqueue{
 		fd:         fd,
 		evs:        make([]unix.Kevent_t, eventSize),
 		polled:     make([]PolledEvent, 0, eventSize),
@@ -52,14 +52,14 @@ func NewSelector(eventSize int, et bool) (Selector, error) {
 	}, nil
 }
 
-func (s *Kqueue) Close() error {
+func (s *kqueue) Close() error {
 	if err := unix.Close(s.fd); err != nil {
 		return os.NewSyscallError("close kqueue", err)
 	}
 	return nil
 }
 
-func (s *Kqueue) Add(fd int, ev SelectorEvent) error {
+func (s *kqueue) Add(fd int, ev SelectorEvent) error {
 	if _, exists := s.registered[fd]; exists {
 		return os.NewSyscallError("kevent add", unix.EEXIST)
 	}
@@ -74,7 +74,7 @@ func (s *Kqueue) Add(fd int, ev SelectorEvent) error {
 	return nil
 }
 
-func (s *Kqueue) Mod(fd int, ev SelectorEvent) error {
+func (s *kqueue) Mod(fd int, ev SelectorEvent) error {
 	old, exists := s.registered[fd]
 	if !exists {
 		return os.NewSyscallError("kevent mod", unix.ENOENT)
@@ -108,7 +108,7 @@ func (s *Kqueue) Mod(fd int, ev SelectorEvent) error {
 	return nil
 }
 
-func (s *Kqueue) Del(fd int) error {
+func (s *kqueue) Del(fd int) error {
 	old, exists := s.registered[fd]
 	if !exists {
 		return os.NewSyscallError("kevent delete", unix.ENOENT)
@@ -130,7 +130,7 @@ func (s *Kqueue) Del(fd int) error {
 	return nil
 }
 
-func (s *Kqueue) Wake() error {
+func (s *kqueue) Wake() error {
 	event := unix.Kevent_t{
 		Ident:  kqueueWakeIdent,
 		Filter: unix.EVFILT_USER,
@@ -142,7 +142,7 @@ func (s *Kqueue) Wake() error {
 	return nil
 }
 
-func (s *Kqueue) Polling(ctx context.Context, timeoutMs int, handle func(evs []PolledEvent)) error {
+func (s *kqueue) Polling(ctx context.Context, timeoutMs int, handle func(evs []PolledEvent)) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -191,7 +191,7 @@ func (s *Kqueue) Polling(ctx context.Context, timeoutMs int, handle func(evs []P
 	}
 }
 
-func (s *Kqueue) addChanges(fd int, ev SelectorEvent) ([]unix.Kevent_t, error) {
+func (s *kqueue) addChanges(fd int, ev SelectorEvent) ([]unix.Kevent_t, error) {
 	filters, err := selectorFilters(ev)
 	if err != nil {
 		return nil, err
@@ -203,7 +203,7 @@ func (s *Kqueue) addChanges(fd int, ev SelectorEvent) ([]unix.Kevent_t, error) {
 	return changes, nil
 }
 
-func (s *Kqueue) addChange(fd int, filter int16) unix.Kevent_t {
+func (s *kqueue) addChange(fd int, filter int16) unix.Kevent_t {
 	flags := uint16(unix.EV_ADD | unix.EV_ENABLE)
 	if s.et {
 		flags |= unix.EV_CLEAR

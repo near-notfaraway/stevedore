@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -166,7 +168,7 @@ func TestUploadManagerStatsIncludeRouteStats(t *testing.T) {
 	manager := registry.newManager()
 	manager.routeUpstream(nil)
 
-	stats := manager.stats().Route
+	stats := manager.stats().route
 	require.Equal(t, uint64(1), stats.DefaultRoutes)
 	require.Equal(t, uint64(1), stats.Drops)
 }
@@ -192,7 +194,7 @@ func TestUploadManagerUpstreamStatsDisabledByDefault(t *testing.T) {
 	require.Nil(t, peer)
 	require.Equal(t, []sd_upstream.Stats{
 		{Name: "default"},
-	}, manager.stats().Upstreams)
+	}, manager.stats().upstreams)
 }
 
 func TestUploadManagerMarksPeerDead(t *testing.T) {
@@ -208,7 +210,7 @@ func TestUploadManagerMarksPeerDead(t *testing.T) {
 	manager.markPeerDead("default", peer)
 
 	require.Same(t, peer, upstream.deadPeer)
-	require.Equal(t, uint64(1), manager.stats().Upstreams[0].PeerFailures)
+	require.Equal(t, uint64(1), manager.stats().upstreams[0].PeerFailures)
 }
 
 func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
@@ -242,11 +244,11 @@ func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
 			SelectionFailures: 1,
 		},
 	}
-	require.Equal(t, managerStats, firstManager.stats().Upstreams)
-	require.Equal(t, managerStats, secondManager.stats().Upstreams)
+	require.Equal(t, managerStats, firstManager.stats().upstreams)
+	require.Equal(t, managerStats, secondManager.stats().upstreams)
 	server := &Server{
 		uploadRegistry: registry,
-		reactors: []*Reactor{
+		reactors: []*reactor{
 			{upstreamMgr: firstManager},
 			{upstreamMgr: secondManager},
 		},
@@ -256,7 +258,7 @@ func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
 			Name:              "default",
 			SelectionFailures: 2,
 		},
-	}, server.uploadStats().Upstreams)
+	}, server.uploadStats().upstreams)
 }
 
 func TestServerAggregatesRouteStatsAcrossManagers(t *testing.T) {
@@ -269,19 +271,19 @@ func TestServerAggregatesRouteStatsAcrossManagers(t *testing.T) {
 	first.routeUpstream(nil)
 	second.routeUpstream(nil)
 
-	require.Equal(t, uint64(1), first.stats().Route.DefaultRoutes)
-	require.Equal(t, uint64(1), first.stats().Route.Drops)
-	require.Equal(t, uint64(1), second.stats().Route.DefaultRoutes)
-	require.Equal(t, uint64(1), second.stats().Route.Drops)
+	require.Equal(t, uint64(1), first.stats().route.DefaultRoutes)
+	require.Equal(t, uint64(1), first.stats().route.Drops)
+	require.Equal(t, uint64(1), second.stats().route.DefaultRoutes)
+	require.Equal(t, uint64(1), second.stats().route.Drops)
 	server := &Server{
 		uploadRegistry: registry,
-		reactors: []*Reactor{
+		reactors: []*reactor{
 			{upstreamMgr: first},
 			{upstreamMgr: second},
 		},
 	}
-	require.Equal(t, uint64(2), server.uploadStats().Route.DefaultRoutes)
-	require.Equal(t, uint64(2), server.uploadStats().Route.Drops)
+	require.Equal(t, uint64(2), server.uploadStats().route.DefaultRoutes)
+	require.Equal(t, uint64(2), server.uploadStats().route.Drops)
 }
 
 func TestUploadManagerUsesFirstMatchingRoute(t *testing.T) {
@@ -351,4 +353,129 @@ func TestUploadManagerStopsAtMissingFirstMatch(t *testing.T) {
 	upstreamName := manager.routeUpstream([]byte{0x01})
 	_, ok := manager.selectPeer(upstreamName, nil)
 	require.False(t, ok)
+}
+
+func TestNewUploadRegistryConvey(t *testing.T) {
+	convey.Convey("Test newUploadRegistry", t, func() {
+		convey.Convey("builds router and definitions", func() {
+			patches := gomonkey.ApplyFuncReturn(
+				sd_upstream.NewPeerGroup,
+				&sd_upstream.PeerGroup{},
+			)
+			defer patches.Reset()
+			registry := newUploadRegistry(&sd_config.UploadConfig{
+				DefaultUpstream: "default",
+				Upstreams: []*sd_config.UpstreamConfig{{
+					Name: "default", Type: sd_upstream.UpstreamTypeRR,
+				}},
+			}, true)
+			convey.So(registry.router, convey.ShouldNotBeNil)
+			convey.So(registry.upstreamRegistry.definitions, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestUploadRegistryNewManagerConvey(t *testing.T) {
+	convey.Convey("Test uploadRegistry.newManager", t, func() {
+		convey.Convey("clones runtime state", func() {
+			registry := newUploadRegistry(&sd_config.UploadConfig{
+				DefaultUpstream: sd_route.DropUpstream,
+			}, false)
+			manager := registry.newManager()
+			convey.So(manager, convey.ShouldNotBeNil)
+			convey.So(manager.router == registry.router, convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestUpstreamRegistryNewManagerConvey(t *testing.T) {
+	convey.Convey("Test upstreamRegistry.newManager", t, func() {
+		convey.Convey("builds named upstreams", func() {
+			stub := &stubUpstream{}
+			patches := gomonkey.ApplyFuncReturn(sd_upstream.NewUpstream, stub)
+			defer patches.Reset()
+			registry := &upstreamRegistry{definitions: []upstreamDefinition{{name: "default"}}}
+			manager := registry.newManager()
+			_, ok := manager.SelectPeer("default", nil)
+			convey.So(ok, convey.ShouldBeTrue)
+		})
+	})
+}
+
+func TestUpstreamDefinitionNewUpstreamConvey(t *testing.T) {
+	convey.Convey("Test upstreamDefinition.newUpstream", t, func() {
+		convey.Convey("delegates configuration", func() {
+			stub := &stubUpstream{}
+			patches := gomonkey.ApplyFuncReturn(sd_upstream.NewUpstream, stub)
+			defer patches.Reset()
+			definition := &upstreamDefinition{name: "default", upstreamType: sd_upstream.UpstreamTypeRR}
+			convey.So(definition.newUpstream(), convey.ShouldEqual, stub)
+		})
+	})
+}
+
+func TestUploadManagerRouteUpstreamConvey(t *testing.T) {
+	convey.Convey("Test uploadManager.routeUpstream", t, func() {
+		convey.Convey("delegates to router", func() {
+			manager := newTestUploadManager(nil, sd_route.NewRouter("default", nil, false))
+			convey.So(manager.routeUpstream(nil), convey.ShouldEqual, "default")
+		})
+	})
+}
+
+func TestUploadManagerSelectPeerConvey(t *testing.T) {
+	convey.Convey("Test uploadManager.selectPeer", t, func() {
+		convey.Convey("delegates to manager", func() {
+			peer := &sd_upstream.Peer{}
+			manager := newTestUploadManager(
+				map[string]sd_upstream.Upstream{"default": &stubUpstream{peer: peer}},
+				sd_route.NewRouter("default", nil, false),
+			)
+			got, ok := manager.selectPeer("default", nil)
+			convey.So(ok, convey.ShouldBeTrue)
+			convey.So(got, convey.ShouldEqual, peer)
+		})
+	})
+}
+
+func TestUploadManagerMarkPeerDeadConvey(t *testing.T) {
+	convey.Convey("Test uploadManager.markPeerDead", t, func() {
+		convey.Convey("delegates to manager", func() {
+			peer := &sd_upstream.Peer{}
+			stub := &stubUpstream{}
+			manager := newTestUploadManager(
+				map[string]sd_upstream.Upstream{"default": stub},
+				sd_route.NewRouter("default", nil, false),
+			)
+			manager.markPeerDead("default", peer)
+			convey.So(stub.deadPeer, convey.ShouldEqual, peer)
+		})
+	})
+}
+
+func TestUploadManagerStatsConvey(t *testing.T) {
+	convey.Convey("Test uploadManager.stats", t, func() {
+		convey.Convey("combines route and upstream stats", func() {
+			manager := newTestUploadManager(
+				map[string]sd_upstream.Upstream{"default": &stubUpstream{}},
+				sd_route.NewRouter("default", nil, true),
+			)
+			stats := manager.stats()
+			convey.So(stats.route.Routes, convey.ShouldBeEmpty)
+			convey.So(stats.upstreams, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestValidateUpstreamTargetsConvey(t *testing.T) {
+	convey.Convey("Test validateUpstreamTargets", t, func() {
+		convey.Convey("accepts existing names", func() {
+			convey.So(func() {
+				validateUpstreamTargets(
+					&sd_config.UploadConfig{DefaultUpstream: "default"},
+					map[string]struct{}{"default": {}},
+				)
+			}, convey.ShouldNotPanic)
+		})
+	})
 }

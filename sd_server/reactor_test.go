@@ -1,14 +1,19 @@
 package sd_server
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
+	"github.com/sirupsen/logrus"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -154,7 +159,7 @@ func receiveBatch(t *testing.T, fd int, container *sd_socket.MMsgContainer) int 
 
 func receiveFromClient(
 	t *testing.T,
-	reactor *Reactor,
+	reactor *reactor,
 	sessionFD int,
 	sess *sd_session.Session,
 	client *net.UDPConn,
@@ -180,5 +185,257 @@ func receiveFromClient(
 		if time.Now().After(deadline) {
 			require.FailNow(t, "receive from client timed out")
 		}
+	}
+}
+
+func TestNewReactorConvey(t *testing.T) {
+	convey.Convey("Test newReactor", t, func() {
+		convey.Convey("initializes reactor-local resources", func() {
+			selector := &conveySelector{}
+			patches := gomonkey.NewPatches()
+			patches.ApplyFuncReturn(sd_socket.NewSelector, selector, nil)
+			patches.ApplyFuncReturn(sd_socket.UDPBoundSocket, 10, nil)
+			defer patches.Reset()
+			config := &sd_config.Config{
+				Server:  &sd_config.ServerConfig{EventSize: 2, BatchSize: 1, BufSize: 1},
+				Session: &sd_config.SessionConfig{TimeoutSec: 10},
+			}
+			got, err := newReactor(1, config, &unix.SockaddrInet4{}, nil)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(got.id, convey.ShouldEqual, 1)
+			convey.So(got.listenFD, convey.ShouldEqual, 10)
+			convey.So(selector.added, convey.ShouldResemble, []int{10})
+		})
+	})
+}
+
+func TestReactorServeConvey(t *testing.T) {
+	convey.Convey("Test reactor.serve", t, func() {
+		convey.Convey("delegates polling", func() {
+			r := newConveyReactor(nil)
+			r.listenFD = -1
+			convey.So(r.serve(context.Background()), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestReactorNowSecConvey(t *testing.T) {
+	convey.Convey("Test reactor.nowSec", t, func() {
+		convey.Convey("uses the monotonic origin", func() {
+			r := &reactor{clockStart: time.Now().Add(-2 * time.Second)}
+			convey.So(r.nowSec(), convey.ShouldBeGreaterThanOrEqualTo, 1)
+		})
+	})
+}
+
+func TestReactorEnqueueReadyConvey(t *testing.T) {
+	convey.Convey("Test reactor.enqueueReady", t, func() {
+		convey.Convey("deduplicates descriptors", func() {
+			r := newConveyReactor(nil)
+			r.enqueueReady(r.listenFD)
+			r.enqueueReady(r.listenFD)
+			convey.So(r.readyFDs, convey.ShouldResemble, []int{r.listenFD})
+		})
+	})
+}
+
+func TestReactorProcessReadyConvey(t *testing.T) {
+	convey.Convey("Test reactor.processReady", t, func() {
+		convey.Convey("drains non-retry descriptors", func() {
+			r := newConveyReactor(nil)
+			r.readyFDs = []int{r.listenFD}
+			r.readySet[r.listenFD] = struct{}{}
+			patches := gomonkey.ApplyFuncReturn(sd_socket.RecvMMsg, 0, unix.EAGAIN)
+			defer patches.Reset()
+			r.processReady()
+			convey.So(r.readyFDs, convey.ShouldBeEmpty)
+			convey.So(r.readySet, convey.ShouldBeEmpty)
+		})
+	})
+}
+
+func TestReactorHandleUploadConvey(t *testing.T) {
+	convey.Convey("Test reactor.handleUpload", t, func() {
+		convey.Convey("stops on EAGAIN", func() {
+			r := newConveyReactor(nil)
+			patches := gomonkey.ApplyFuncReturn(sd_socket.RecvMMsg, 0, unix.EAGAIN)
+			defer patches.Reset()
+			convey.So(r.handleUpload(), convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestReactorHandleUploadPacketConvey(t *testing.T) {
+	convey.Convey("Test reactor.handleUploadPacket", t, func() {
+		convey.Convey("creates a dropped session", func() {
+			manager := newTestUploadManager(nil, sd_route.NewRouter("", nil, false))
+			r := newConveyReactor(manager)
+			patches := gomonkey.NewPatches()
+			patches.ApplyMethodReturn(r.rxMC, "GetLengthOfMsg", uint32(1))
+			patches.ApplyMethodReturn(r.rxMC, "GetBufOfMsg", []byte{1})
+			patches.ApplyMethodReturn(r.rxMC, "GetRSockaddrKeyOfMsg", sd_socket.SockaddrKey{})
+			defer patches.Reset()
+			r.handleUploadPacket(0, 0)
+			convey.So(r.sessions, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestReactorCreateSessionConvey(t *testing.T) {
+	convey.Convey("Test reactor.createSession", t, func() {
+		convey.Convey("stores and schedules a session", func() {
+			r := newConveyReactor(nil)
+			key := sd_socket.SockaddrKey{}
+			sess := r.createSession(key)
+			convey.So(r.sessions[key], convey.ShouldEqual, sess)
+		})
+	})
+}
+
+func TestReactorGetOrCreateSessionFDConvey(t *testing.T) {
+	convey.Convey("Test reactor.getOrCreateSessionFD", t, func() {
+		convey.Convey("creates and indexes a descriptor", func() {
+			r := newConveyReactor(nil)
+			sess := sd_session.NewSession(sd_socket.SockaddrKey{})
+			patches := gomonkey.ApplyFuncReturn(sd_socket.UDPSocket, 11, nil)
+			defer patches.Reset()
+			fd, err := r.getOrCreateSessionFD(sess, unix.AF_INET)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(fd, convey.ShouldEqual, 11)
+			convey.So(r.sessionsByFD[11], convey.ShouldEqual, sess)
+		})
+	})
+}
+
+func TestReactorHandleDownloadConvey(t *testing.T) {
+	convey.Convey("Test reactor.handleDownload", t, func() {
+		convey.Convey("stops on EAGAIN", func() {
+			r := newConveyReactor(nil)
+			patches := gomonkey.ApplyFuncReturn(sd_socket.RecvMMsg, 0, unix.EAGAIN)
+			defer patches.Reset()
+			convey.So(r.handleDownload(1, sd_session.NewSession(sd_socket.SockaddrKey{})), convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestReactorSendDownloadBatchConvey(t *testing.T) {
+	convey.Convey("Test reactor.sendDownloadBatch", t, func() {
+		convey.Convey("advances sent packets", func() {
+			r := newConveyReactor(nil)
+			patches := gomonkey.ApplyFuncReturn(sd_socket.SendMMsg, 2, nil)
+			defer patches.Reset()
+			convey.So(r.sendDownloadBatch(2), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestReactorExpireSessionsConvey(t *testing.T) {
+	convey.Convey("Test reactor.expireSessions", t, func() {
+		convey.Convey("removes expired sessions", func() {
+			r := newConveyReactor(nil)
+			key := sd_socket.SockaddrKey{}
+			r.createSession(key)
+			r.expireSessions(11)
+			convey.So(r.sessions, convey.ShouldBeEmpty)
+		})
+	})
+}
+
+func TestReactorRemoveSessionConvey(t *testing.T) {
+	convey.Convey("Test reactor.removeSession", t, func() {
+		convey.Convey("removes it from tables", func() {
+			r := newConveyReactor(nil)
+			key := sd_socket.SockaddrKey{}
+			sess := r.createSession(key)
+			r.removeSession(sess)
+			convey.So(r.sessions, convey.ShouldBeEmpty)
+		})
+	})
+}
+
+func TestReactorCloseSessionConvey(t *testing.T) {
+	convey.Convey("Test reactor.closeSession", t, func() {
+		convey.Convey("removes the session key", func() {
+			r := newConveyReactor(nil)
+			key := sd_socket.SockaddrKey{}
+			sess := sd_session.NewSession(key)
+			r.sessions[key] = sess
+			r.closeSession(sess)
+			convey.So(r.sessions, convey.ShouldBeEmpty)
+		})
+	})
+}
+
+func TestReactorCloseConvey(t *testing.T) {
+	convey.Convey("Test reactor.close", t, func() {
+		convey.Convey("releases selector ownership", func() {
+			selector := &conveySelector{}
+			r := newConveyReactor(nil)
+			r.selector = selector
+			patches := gomonkey.ApplyFuncReturn(unix.Close, nil)
+			defer patches.Reset()
+			r.close()
+			convey.So(selector.deleted, convey.ShouldResemble, []int{r.listenFD})
+		})
+	})
+}
+
+type conveySelector struct {
+	added   []int
+	deleted []int
+	wakes   int
+	pollErr error
+}
+
+func (s *conveySelector) Add(fd int, _ sd_socket.SelectorEvent) error {
+	s.added = append(s.added, fd)
+	return nil
+}
+
+func (s *conveySelector) Mod(int, sd_socket.SelectorEvent) error {
+	return nil
+}
+
+func (s *conveySelector) Del(fd int) error {
+	s.deleted = append(s.deleted, fd)
+	return nil
+}
+
+func (s *conveySelector) Wake() error {
+	s.wakes++
+	return nil
+}
+
+func (s *conveySelector) Polling(
+	ctx context.Context,
+	_ int,
+	handle func([]sd_socket.PolledEvent),
+) error {
+	handle(nil)
+	return s.pollErr
+}
+
+func (s *conveySelector) Close() error {
+	return nil
+}
+
+func newConveyReactor(manager *uploadManager) *reactor {
+	return &reactor{
+		config: &sd_config.Config{
+			Server:  &sd_config.ServerConfig{MaxTryTimes: 1},
+			Session: &sd_config.SessionConfig{TimeoutSec: 10},
+		},
+		selector:       &conveySelector{},
+		listenFD:       -1,
+		sessions:       make(map[sd_socket.SockaddrKey]*sd_session.Session),
+		sessionsByFD:   make(map[int]*sd_session.Session),
+		sessionWheel:   sd_session.NewWheel(1, 10, 0),
+		upstreamMgr:    manager,
+		rxMC:           sd_socket.NewMMsgContainer(1, 1),
+		txMC:           sd_socket.NewSendMMsgContainer(1),
+		readySet:       make(map[int]struct{}),
+		recvBatchLimit: 1,
+		clockStart:     time.Now(),
+		logger:         logrus.New().WithField("test", true),
 	}
 }

@@ -12,7 +12,7 @@ const (
 )
 
 type keyExtractor interface {
-	Extract(data []byte) ([]byte, bool)
+	extract(data []byte) ([]byte, bool)
 }
 
 func newKeyExtractor(config *sd_config.UpstreamConfig) (keyExtractor, error) {

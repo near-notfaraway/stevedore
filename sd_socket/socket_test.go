@@ -3,6 +3,8 @@ package sd_socket
 import (
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -148,5 +150,48 @@ func TestSendTo(t *testing.T) {
 			Port: 1,
 		})
 		require.Error(t, err)
+	})
+}
+
+func TestUDPBoundSocketConvey(t *testing.T) {
+	convey.Convey("Test UDPBoundSocket", t, func() {
+		convey.Convey("rejects a non-IP sockaddr", func() {
+			fd, err := UDPBoundSocket(&unix.SockaddrUnix{Name: "invalid"}, false, false, false)
+			convey.So(fd, convey.ShouldEqual, -1)
+			convey.So(err, convey.ShouldNotBeNil)
+		})
+	})
+}
+
+func TestUDPSocketConvey(t *testing.T) {
+	convey.Convey("Test UDPSocket", t, func() {
+		convey.Convey("delegates platform socket creation", func() {
+			patches := gomonkey.ApplyFuncReturn(newUDPSocket, 99, nil)
+			defer patches.Reset()
+			fd, err := UDPSocket(unix.AF_INET, false, false, false)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(fd, convey.ShouldEqual, 99)
+		})
+	})
+}
+
+func TestSendToConvey(t *testing.T) {
+	convey.Convey("Test SendTo", t, func() {
+		convey.Convey("delegates to unix.Sendto", func() {
+			called := false
+			patches := gomonkey.ApplyFunc(
+				unix.Sendto,
+				func(fd int, p []byte, flags int, to unix.Sockaddr) error {
+					called = true
+					convey.So(fd, convey.ShouldEqual, 3)
+					convey.So(p, convey.ShouldResemble, []byte("payload"))
+					return nil
+				},
+			)
+			defer patches.Reset()
+			err := SendTo(3, []byte("payload"), 0, &unix.SockaddrInet4{})
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(called, convey.ShouldBeTrue)
+		})
 	})
 }

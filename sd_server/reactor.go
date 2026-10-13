@@ -18,7 +18,7 @@ const (
 	defaultRecvBatchesPerFD = 8
 )
 
-type Reactor struct {
+type reactor struct {
 	id             int                                           // unique reactor id
 	config         *sd_config.Config                             // immutable global configuration
 	selector       sd_socket.Selector                            // reactor-local platform selector
@@ -36,7 +36,7 @@ type Reactor struct {
 	logger         *logrus.Entry                                 // reactor-scoped logger
 }
 
-func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *uploadManager) (*Reactor, error) {
+func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *uploadManager) (*reactor, error) {
 	eventSize := config.Server.EventSize
 	if eventSize < 1 {
 		eventSize = sd_socket.DefaultEventSize
@@ -66,7 +66,7 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 		recvBatchLimit = defaultRecvBatchesPerFD
 	}
 	clockStart := time.Now()
-	return &Reactor{
+	return &reactor{
 		id:             id,
 		config:         config,
 		selector:       selector,
@@ -85,7 +85,7 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 	}, nil
 }
 
-func (r *Reactor) Serve(ctx context.Context) error {
+func (r *reactor) serve(ctx context.Context) error {
 	r.logger.Debug("start reactor")
 	defer r.close()
 
@@ -101,11 +101,11 @@ func (r *Reactor) Serve(ctx context.Context) error {
 	})
 }
 
-func (r *Reactor) nowSec() int64 {
+func (r *reactor) nowSec() int64 {
 	return int64(time.Since(r.clockStart) / time.Second)
 }
 
-func (r *Reactor) enqueueReady(fd int) {
+func (r *reactor) enqueueReady(fd int) {
 	if fd != r.listenFD {
 		if _, ok := r.sessionsByFD[fd]; !ok {
 			return
@@ -118,7 +118,7 @@ func (r *Reactor) enqueueReady(fd int) {
 	r.readyFDs = append(r.readyFDs, fd)
 }
 
-func (r *Reactor) processReady() {
+func (r *reactor) processReady() {
 	current := r.readyFDs
 	r.readyFDs = current[:0]
 
@@ -143,7 +143,7 @@ func (r *Reactor) processReady() {
 	}
 }
 
-func (r *Reactor) handleUpload() bool {
+func (r *reactor) handleUpload() bool {
 	r.rxMC.ResetNameLengths()
 	for batch := 0; batch < r.recvBatchLimit; batch++ {
 		nPkt, errno := sd_socket.RecvMMsg(r.listenFD, r.rxMC)
@@ -162,7 +162,7 @@ func (r *Reactor) handleUpload() bool {
 	return true
 }
 
-func (r *Reactor) handleUploadPacket(index int, now int64) {
+func (r *reactor) handleUploadPacket(index int, now int64) {
 	nr := r.rxMC.GetLengthOfMsg(index)
 	buf := r.rxMC.GetBufOfMsg(index)[:nr]
 	key := r.rxMC.GetRSockaddrKeyOfMsg(index)
@@ -211,14 +211,14 @@ func (r *Reactor) handleUploadPacket(index int, now int64) {
 	r.logger.Error("upload packet failed, drop it")
 }
 
-func (r *Reactor) createSession(key sd_socket.SockaddrKey) *sd_session.Session {
+func (r *reactor) createSession(key sd_socket.SockaddrKey) *sd_session.Session {
 	sess := sd_session.NewSession(key)
 	r.sessions[key] = sess
 	r.sessionWheel.Add(sess, r.nowSec())
 	return sess
 }
 
-func (r *Reactor) getOrCreateSessionFD(sess *sd_session.Session, family int) (int, error) {
+func (r *reactor) getOrCreateSessionFD(sess *sd_session.Session, family int) (int, error) {
 	if fd, ok := sess.GetFDByFamily(family); ok {
 		return fd, nil
 	}
@@ -237,7 +237,7 @@ func (r *Reactor) getOrCreateSessionFD(sess *sd_session.Session, family int) (in
 	return fd, nil
 }
 
-func (r *Reactor) handleDownload(fd int, sess *sd_session.Session) bool {
+func (r *reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 	for batch := 0; batch < r.recvBatchLimit; batch++ {
 		nPkt, errno := sd_socket.RecvMMsg(fd, r.rxMC)
 		if nPkt < 1 || errno != 0 {
@@ -262,7 +262,7 @@ func (r *Reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 	return true
 }
 
-func (r *Reactor) sendDownloadBatch(packetCount int) error {
+func (r *reactor) sendDownloadBatch(packetCount int) error {
 	sent := 0
 	for sent < packetCount {
 		n, err := sd_socket.SendMMsg(r.listenFD, r.txMC, sent, packetCount)
@@ -283,16 +283,16 @@ func (r *Reactor) sendDownloadBatch(packetCount int) error {
 	return nil
 }
 
-func (r *Reactor) expireSessions(now int64) {
+func (r *reactor) expireSessions(now int64) {
 	r.sessionWheel.Advance(now, r.closeSession)
 }
 
-func (r *Reactor) removeSession(sess *sd_session.Session) {
+func (r *reactor) removeSession(sess *sd_session.Session) {
 	r.sessionWheel.Remove(sess)
 	r.closeSession(sess)
 }
 
-func (r *Reactor) closeSession(sess *sd_session.Session) {
+func (r *reactor) closeSession(sess *sd_session.Session) {
 	delete(r.sessions, sess.GetKey())
 	for _, fd := range sess.GetFDs() {
 		delete(r.sessionsByFD, fd)
@@ -305,7 +305,7 @@ func (r *Reactor) closeSession(sess *sd_session.Session) {
 	}
 }
 
-func (r *Reactor) close() {
+func (r *reactor) close() {
 	for _, sess := range r.sessions {
 		r.removeSession(sess)
 	}

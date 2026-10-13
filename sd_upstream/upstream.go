@@ -13,8 +13,11 @@ const (
 	UpstreamTypeRR    = "rr"
 	UpstreamTypeCHash = "chash"
 
-	InvalidKeyPolicyDrop = "drop"
-	InvalidKeyPolicyRR   = "rr"
+	invalidKeyPolicyDrop = "drop"
+	invalidKeyPolicyRR   = "rr"
+
+	maxUint64     = 18446744073709551615
+	maxRRListSize = 1 << 16
 )
 
 type Upstream interface {
@@ -25,15 +28,15 @@ type Upstream interface {
 func NewUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) Upstream {
 	switch config.Type {
 	case UpstreamTypeRR:
-		return NewRRUpstream(group)
+		return newRRUpstream(group)
 	case UpstreamTypeCHash:
-		return NewCHashUpstream(config, group)
+		return newCHashUpstream(config, group)
 	default:
 		panic(fmt.Errorf("invalid upstream type: %s", config.Type))
 	}
 }
 
-func InitUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup *Peer) {
+func initUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup *Peer) {
 	peers = make([]*Peer, 0, len(config.Peers))
 	uniqueMap := make(map[string]struct{})
 
@@ -60,49 +63,45 @@ func InitUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup 
 	return
 }
 
-const MaxUint64 = 18446744073709551615
-
-const maxRRListSize = 1 << 16
-
-type RRUpstream struct {
+type rrUpstream struct {
 	group           *PeerGroup // shared peer control plane
 	snapshotVersion uint64     // version used to build rrList
 	rrList          []*Peer    // reactor-local weighted round-robin list
 	cur             uint64     // reactor-local selection cursor
 }
 
-func NewRRUpstream(group *PeerGroup) *RRUpstream {
-	ups := &RRUpstream{
+func newRRUpstream(group *PeerGroup) *rrUpstream {
+	ups := &rrUpstream{
 		group: group,
-		cur:   MaxUint64,
+		cur:   maxUint64,
 	}
 	ups.syncSnapshot()
 	return ups
 }
 
-func (u *RRUpstream) SelectPeer(_ []byte) *Peer {
+func (u *rrUpstream) SelectPeer(_ []byte) *Peer {
 	u.syncSnapshot()
 	if len(u.rrList) == 0 {
 		return nil
 	}
 	u.cur++
-	if u.cur == MaxUint64 {
+	if u.cur == maxUint64 {
 		u.cur++
 	}
 	return u.rrList[u.cur%uint64(len(u.rrList))]
 }
 
-func (u *RRUpstream) MarkPeerDead(peer *Peer) {
-	u.group.MarkDead(peer)
+func (u *rrUpstream) MarkPeerDead(peer *Peer) {
+	u.group.markDead(peer)
 }
 
-func (u *RRUpstream) syncSnapshot() {
-	snapshot := u.group.Snapshot()
-	if snapshot.Version == u.snapshotVersion {
+func (u *rrUpstream) syncSnapshot() {
+	snapshot := u.group.snapshot()
+	if snapshot.version == u.snapshotVersion {
 		return
 	}
-	u.rrList = buildRRList(snapshot.Peers)
-	u.snapshotVersion = snapshot.Version
+	u.rrList = buildRRList(snapshot.peers)
+	u.snapshotVersion = snapshot.version
 }
 
 func buildRRList(peers []*Peer) []*Peer {
@@ -155,15 +154,15 @@ func greatestCommonDivisor(a, b int) int {
 	return a
 }
 
-type CHashUpstream struct {
+type cHashUpstream struct {
 	group           *PeerGroup      // shared peer control plane
 	snapshotVersion uint64          // version used to build cHash
-	cHash           *ConsistentHash // reactor-local lookup table
+	cHash           *consistentHash // reactor-local lookup table
 	key             keyExtractor    // extracts the payload hash key
-	fallback        *RRUpstream     // optional fallback for invalid payload keys
+	fallback        *rrUpstream     // optional fallback for invalid payload keys
 }
 
-func NewCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *CHashUpstream {
+func newCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *cHashUpstream {
 	key, err := newKeyExtractor(config)
 	if err != nil {
 		logrus.Panicf("payload key is invalid in upstream %s: %v", config.Name, err)
@@ -171,20 +170,20 @@ func NewCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *CHash
 
 	policy := config.InvalidKeyPolicy
 	if policy == "" {
-		policy = InvalidKeyPolicyDrop
+		policy = invalidKeyPolicyDrop
 	}
-	var fallback *RRUpstream
+	var fallback *rrUpstream
 	switch policy {
-	case InvalidKeyPolicyDrop:
-	case InvalidKeyPolicyRR:
-		fallback = NewRRUpstream(group)
+	case invalidKeyPolicyDrop:
+	case invalidKeyPolicyRR:
+		fallback = newRRUpstream(group)
 	default:
 		logrus.Panicf("invalid key policy %s in upstream %s", policy, config.Name)
 	}
 
-	ups := &CHashUpstream{
+	ups := &cHashUpstream{
 		group:    group,
-		cHash:    NewConsistentHash(nil),
+		cHash:    newConsistentHash(nil),
 		key:      key,
 		fallback: fallback,
 	}
@@ -192,8 +191,8 @@ func NewCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *CHash
 	return ups
 }
 
-func (u *CHashUpstream) SelectPeer(data []byte) *Peer {
-	key, ok := u.key.Extract(data)
+func (u *cHashUpstream) SelectPeer(data []byte) *Peer {
+	key, ok := u.key.extract(data)
 	if !ok {
 		if u.fallback != nil {
 			return u.fallback.SelectPeer(data)
@@ -201,18 +200,18 @@ func (u *CHashUpstream) SelectPeer(data []byte) *Peer {
 		return nil
 	}
 	u.syncSnapshot()
-	return u.cHash.SelectPeer(key)
+	return u.cHash.selectPeer(key)
 }
 
-func (u *CHashUpstream) MarkPeerDead(peer *Peer) {
-	u.group.MarkDead(peer)
+func (u *cHashUpstream) MarkPeerDead(peer *Peer) {
+	u.group.markDead(peer)
 }
 
-func (u *CHashUpstream) syncSnapshot() {
-	snapshot := u.group.Snapshot()
-	if snapshot.Version == u.snapshotVersion {
+func (u *cHashUpstream) syncSnapshot() {
+	snapshot := u.group.snapshot()
+	if snapshot.version == u.snapshotVersion {
 		return
 	}
-	_ = u.cHash.UpdateLookupTable(snapshot.Peers)
-	u.snapshotVersion = snapshot.Version
+	_ = u.cHash.updateLookupTable(snapshot.peers)
+	u.snapshotVersion = snapshot.version
 }

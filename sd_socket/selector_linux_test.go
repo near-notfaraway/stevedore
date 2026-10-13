@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -14,7 +15,7 @@ import (
 func TestEpollerLinuxLifecycle(t *testing.T) {
 	selector, err := NewSelector(0, true)
 	require.NoError(t, err)
-	epoller := selector.(*Epoller)
+	epoller := selector.(*epoller)
 	require.Len(t, epoller.evs, DefaultEventSize)
 	require.Len(t, epoller.polled, 0)
 	t.Cleanup(func() { _ = selector.Close() })
@@ -35,7 +36,7 @@ func TestEpollerLinuxLifecycle(t *testing.T) {
 }
 
 func TestEpollEventsLinux(t *testing.T) {
-	level := &Epoller{}
+	level := &epoller{}
 	read, err := level.epollEvents(SelectorEventRead)
 	require.NoError(t, err)
 	require.Equal(t, uint32(unix.EPOLLIN), read)
@@ -48,7 +49,7 @@ func TestEpollEventsLinux(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(unix.EPOLLIN|unix.EPOLLOUT), readWrite)
 
-	edge := &Epoller{et: true}
+	edge := &epoller{et: true}
 	events, err := edge.epollEvents(SelectorEventRead)
 	require.NoError(t, err)
 	require.NotZero(t, events&unix.EPOLLET)
@@ -58,7 +59,7 @@ func TestEpollEventsLinux(t *testing.T) {
 }
 
 func TestEventFDLinux(t *testing.T) {
-	fd, err := NewEventFD()
+	fd, err := newEventFD()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = unix.Close(fd) })
 
@@ -69,17 +70,17 @@ func TestEventFDLinux(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, descriptorFlags&unix.FD_CLOEXEC)
 
-	require.NoError(t, NotifyEventFD(fd))
-	require.NoError(t, NotifyEventFD(fd))
-	require.NoError(t, DrainEventFD(fd))
-	require.NoError(t, DrainEventFD(fd))
+	require.NoError(t, notifyEventFD(fd))
+	require.NoError(t, notifyEventFD(fd))
+	require.NoError(t, drainEventFD(fd))
+	require.NoError(t, drainEventFD(fd))
 
-	require.Error(t, NotifyEventFD(-1))
-	require.Error(t, DrainEventFD(-1))
+	require.Error(t, notifyEventFD(-1))
+	require.Error(t, drainEventFD(-1))
 }
 
 func TestSelectorPollingReadAndWakeLinux(t *testing.T) {
-	selector, err := NewEpoller(8, true)
+	selector, err := newEpoller(8, true)
 	require.NoError(t, err)
 	defer selector.Close()
 
@@ -146,7 +147,7 @@ func TestSelectorPollingReadAndWakeLinux(t *testing.T) {
 }
 
 func TestSelectorPollingReturnsWhenContextCanceledLinux(t *testing.T) {
-	selector, err := NewEpoller(1, false)
+	selector, err := newEpoller(1, false)
 	require.NoError(t, err)
 	defer selector.Close()
 
@@ -158,7 +159,7 @@ func TestSelectorPollingReturnsWhenContextCanceledLinux(t *testing.T) {
 }
 
 func TestEpollerLinuxReportsClosedDescriptorErrors(t *testing.T) {
-	selector, err := NewEpoller(1, false)
+	selector, err := newEpoller(1, false)
 	require.NoError(t, err)
 	require.NoError(t, selector.Close())
 
@@ -167,4 +168,140 @@ func TestEpollerLinuxReportsClosedDescriptorErrors(t *testing.T) {
 	require.Error(t, selector.Mod(0, SelectorEventRead))
 	require.Error(t, selector.Del(0))
 	require.Error(t, selector.Close())
+}
+
+func TestNewSelectorConvey(t *testing.T) {
+	convey.Convey("Test NewSelector", t, func() {
+		convey.Convey("creates an epoller", func() {
+			selector, err := NewSelector(1, false)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(selector, convey.ShouldHaveSameTypeAs, &epoller{})
+			convey.So(selector.Close(), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestNewEpollerConvey(t *testing.T) {
+	convey.Convey("Test newEpoller", t, func() {
+		convey.Convey("initializes epoll and wake descriptors", func() {
+			selector, err := newEpoller(2, true)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(selector.(*epoller).evs, convey.ShouldHaveLength, 2)
+			convey.So(selector.Close(), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestEpollerCloseConvey(t *testing.T) {
+	convey.Convey("Test epoller.Close", t, func() {
+		convey.Convey("closes owned descriptors", func() {
+			selector, _ := newEpoller(1, false)
+			convey.So(selector.Close(), convey.ShouldBeNil)
+			convey.So(selector.Close(), convey.ShouldNotBeNil)
+		})
+	})
+}
+
+func TestEpollerAddConvey(t *testing.T) {
+	convey.Convey("Test epoller.Add", t, func() {
+		convey.Convey("rejects an invalid event", func() {
+			selector, _ := newEpoller(1, false)
+			defer selector.Close()
+			convey.So(selector.Add(0, SelectorEvent(255)), convey.ShouldNotBeNil)
+		})
+	})
+}
+
+func TestEpollerModConvey(t *testing.T) {
+	convey.Convey("Test epoller.Mod", t, func() {
+		convey.Convey("rejects an invalid event", func() {
+			selector, _ := newEpoller(1, false)
+			defer selector.Close()
+			convey.So(selector.Mod(0, SelectorEvent(255)), convey.ShouldNotBeNil)
+		})
+	})
+}
+
+func TestEpollerControlConvey(t *testing.T) {
+	convey.Convey("Test epoller.control", t, func() {
+		convey.Convey("rejects an invalid event before syscall", func() {
+			convey.So((&epoller{}).control(unix.EPOLL_CTL_ADD, 0, SelectorEvent(255)), convey.ShouldNotBeNil)
+		})
+	})
+}
+
+func TestEpollerEpollEventsConvey(t *testing.T) {
+	convey.Convey("Test epoller.epollEvents", t, func() {
+		convey.Convey("maps read and write", func() {
+			events, err := (&epoller{et: true}).epollEvents(SelectorEventReadWrite)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(events&unix.EPOLLIN, convey.ShouldNotEqual, 0)
+			convey.So(events&unix.EPOLLOUT, convey.ShouldNotEqual, 0)
+			convey.So(events&unix.EPOLLET, convey.ShouldNotEqual, 0)
+		})
+	})
+}
+
+func TestEpollerDelConvey(t *testing.T) {
+	convey.Convey("Test epoller.Del", t, func() {
+		convey.Convey("reports an unknown descriptor", func() {
+			selector, _ := newEpoller(1, false)
+			defer selector.Close()
+			convey.So(selector.Del(-1), convey.ShouldNotBeNil)
+		})
+	})
+}
+
+func TestEpollerWakeConvey(t *testing.T) {
+	convey.Convey("Test epoller.Wake", t, func() {
+		convey.Convey("notifies the selector", func() {
+			selector, _ := newEpoller(1, false)
+			defer selector.Close()
+			convey.So(selector.Wake(), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestEpollerPollingConvey(t *testing.T) {
+	convey.Convey("Test epoller.Polling", t, func() {
+		convey.Convey("returns for canceled context", func() {
+			selector, _ := newEpoller(1, false)
+			defer selector.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			convey.So(selector.Polling(ctx, -1, func([]PolledEvent) {}), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestNewEventFDConvey(t *testing.T) {
+	convey.Convey("Test newEventFD", t, func() {
+		convey.Convey("creates an event descriptor", func() {
+			fd, err := newEventFD()
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(fd, convey.ShouldBeGreaterThanOrEqualTo, 0)
+			convey.So(unix.Close(fd), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestNotifyEventFDConvey(t *testing.T) {
+	convey.Convey("Test notifyEventFD", t, func() {
+		convey.Convey("writes a notification", func() {
+			fd, _ := newEventFD()
+			defer unix.Close(fd)
+			convey.So(notifyEventFD(fd), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestDrainEventFDConvey(t *testing.T) {
+	convey.Convey("Test drainEventFD", t, func() {
+		convey.Convey("consumes notifications", func() {
+			fd, _ := newEventFD()
+			defer unix.Close(fd)
+			convey.So(notifyEventFD(fd), convey.ShouldBeNil)
+			convey.So(drainEventFD(fd), convey.ShouldBeNil)
+		})
+	})
 }

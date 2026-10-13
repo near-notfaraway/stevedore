@@ -56,7 +56,7 @@ func newLengthFieldKeyExtractor(config sd_config.LengthFieldKeyConfig) (*lengthF
 	}, nil
 }
 
-func (e *lengthFieldKeyExtractor) Extract(data []byte) ([]byte, bool) {
+func (e *lengthFieldKeyExtractor) extract(data []byte) ([]byte, bool) {
 	if len(data) < e.lengthEnd {
 		return nil, false
 	}

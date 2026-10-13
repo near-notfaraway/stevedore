@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type Epoller struct {
+type epoller struct {
 	fd     int
 	wakeFD int
 	evs    []unix.EpollEvent
@@ -21,10 +21,10 @@ type Epoller struct {
 }
 
 func NewSelector(eventSize int, et bool) (Selector, error) {
-	return NewEpoller(eventSize, et)
+	return newEpoller(eventSize, et)
 }
 
-func NewEpoller(eventSize int, et bool) (Selector, error) {
+func newEpoller(eventSize int, et bool) (Selector, error) {
 	if eventSize < 1 {
 		eventSize = DefaultEventSize
 	}
@@ -34,13 +34,13 @@ func NewEpoller(eventSize int, et bool) (Selector, error) {
 		return nil, os.NewSyscallError("epoll_create1", err)
 	}
 
-	wakeFD, err := NewEventFD()
+	wakeFD, err := newEventFD()
 	if err != nil {
 		_ = unix.Close(fd)
 		return nil, err
 	}
 
-	s := &Epoller{
+	s := &epoller{
 		fd:     fd,
 		wakeFD: wakeFD,
 		evs:    make([]unix.EpollEvent, eventSize),
@@ -55,7 +55,7 @@ func NewEpoller(eventSize int, et bool) (Selector, error) {
 	return s, nil
 }
 
-func (s *Epoller) Close() error {
+func (s *epoller) Close() error {
 	var firstErr error
 	if err := unix.Close(s.wakeFD); err != nil {
 		firstErr = os.NewSyscallError("close eventfd", err)
@@ -66,15 +66,15 @@ func (s *Epoller) Close() error {
 	return firstErr
 }
 
-func (s *Epoller) Add(fd int, ev SelectorEvent) error {
+func (s *epoller) Add(fd int, ev SelectorEvent) error {
 	return s.control(unix.EPOLL_CTL_ADD, fd, ev)
 }
 
-func (s *Epoller) Mod(fd int, ev SelectorEvent) error {
+func (s *epoller) Mod(fd int, ev SelectorEvent) error {
 	return s.control(unix.EPOLL_CTL_MOD, fd, ev)
 }
 
-func (s *Epoller) control(op, fd int, ev SelectorEvent) error {
+func (s *epoller) control(op, fd int, ev SelectorEvent) error {
 	events, err := s.epollEvents(ev)
 	if err != nil {
 		return err
@@ -89,7 +89,7 @@ func (s *Epoller) control(op, fd int, ev SelectorEvent) error {
 	return nil
 }
 
-func (s *Epoller) epollEvents(ev SelectorEvent) (uint32, error) {
+func (s *epoller) epollEvents(ev SelectorEvent) (uint32, error) {
 	var events uint32
 	if s.et {
 		events = unix.EPOLLET
@@ -107,18 +107,18 @@ func (s *Epoller) epollEvents(ev SelectorEvent) (uint32, error) {
 	return events, nil
 }
 
-func (s *Epoller) Del(fd int) error {
+func (s *epoller) Del(fd int) error {
 	if err := unix.EpollCtl(s.fd, unix.EPOLL_CTL_DEL, fd, nil); err != nil {
 		return os.NewSyscallError("epoll_ctl del", err)
 	}
 	return nil
 }
 
-func (s *Epoller) Wake() error {
-	return NotifyEventFD(s.wakeFD)
+func (s *epoller) Wake() error {
+	return notifyEventFD(s.wakeFD)
 }
 
-func (s *Epoller) Polling(ctx context.Context, timeoutMs int, handle func(evs []PolledEvent)) error {
+func (s *epoller) Polling(ctx context.Context, timeoutMs int, handle func(evs []PolledEvent)) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -139,7 +139,7 @@ func (s *Epoller) Polling(ctx context.Context, timeoutMs int, handle func(evs []
 			event := s.evs[i]
 			fd := int(event.Fd)
 			if fd == s.wakeFD {
-				if err = DrainEventFD(s.wakeFD); err != nil {
+				if err = drainEventFD(s.wakeFD); err != nil {
 					return err
 				}
 				continue
@@ -160,8 +160,7 @@ func (s *Epoller) Polling(ctx context.Context, timeoutMs int, handle func(evs []
 	}
 }
 
-
-func NewEventFD() (int, error) {
+func newEventFD() (int, error) {
 	fd, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
 	if err != nil {
 		return -1, os.NewSyscallError("eventfd", err)
@@ -169,7 +168,7 @@ func NewEventFD() (int, error) {
 	return fd, nil
 }
 
-func NotifyEventFD(fd int) error {
+func notifyEventFD(fd int) error {
 	value := uint64(1)
 	buf := (*[8]byte)(unsafe.Pointer(&value))[:]
 	for {
@@ -187,7 +186,7 @@ func NotifyEventFD(fd int) error {
 	}
 }
 
-func DrainEventFD(fd int) error {
+func drainEventFD(fd int) error {
 	var value uint64
 	buf := (*[8]byte)(unsafe.Pointer(&value))[:]
 	for {

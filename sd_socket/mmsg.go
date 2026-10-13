@@ -1,21 +1,21 @@
 package sd_socket
 
 const (
-	MinMMsgContainerBatchNum = 32
-	MinMMsgContainerMTU      = 4096
+	minMMsgContainerBatchNum = 32
+	minMMsgContainerMTU      = 4096
 )
 
 type SockaddrKey struct {
-	NameLen uint32
-	Name    [SizeofSockaddrInet6]byte
+	nameLen uint32
+	name    [sizeofSockaddrInet6]byte
 }
 
 func normalizeMMsgSize(batchNum, mtu int) (int, int) {
-	if batchNum < MinMMsgContainerBatchNum {
-		batchNum = MinMMsgContainerBatchNum
+	if batchNum < minMMsgContainerBatchNum {
+		batchNum = minMMsgContainerBatchNum
 	}
-	if mtu < MinMMsgContainerMTU {
-		mtu = MinMMsgContainerMTU
+	if mtu < minMMsgContainerMTU {
+		mtu = minMMsgContainerMTU
 	}
 	return batchNum, mtu
 }

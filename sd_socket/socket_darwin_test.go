@@ -6,6 +6,7 @@ package sd_socket
 import (
 	"testing"
 
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -134,4 +135,23 @@ func countOpenFDs() int {
 		}
 	}
 	return count
+}
+
+func TestReusePortShardingSupportedConvey(t *testing.T) {
+	convey.Convey("Test ReusePortShardingSupported", t, func() {
+		convey.Convey("reports Darwin behavior", func() {
+			convey.So(ReusePortShardingSupported(), convey.ShouldBeFalse)
+		})
+	})
+}
+
+func TestNewUDPSocketConvey(t *testing.T) {
+	convey.Convey("Test newUDPSocket", t, func() {
+		convey.Convey("creates a datagram descriptor", func() {
+			fd, err := newUDPSocket(unix.AF_INET, true)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(fd, convey.ShouldBeGreaterThanOrEqualTo, 0)
+			convey.So(unix.Close(fd), convey.ShouldBeNil)
+		})
+	})
 }

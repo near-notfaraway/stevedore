@@ -1,15 +1,19 @@
 package sd_util
 
 import (
-	"github.com/stretchr/testify/assert"
+	"io/ioutil"
 	"os"
 	"testing"
+
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/smartystreets/goconvey/convey"
+	"github.com/stretchr/testify/assert"
 )
 
-type TestStruct struct {
+type testStruct struct {
 	T1 int
 	T2 string
-	T3 *struct{
+	T3 *struct {
 		T4 bool
 	}
 }
@@ -32,7 +36,7 @@ func TestUnmarshalFile_Json(t *testing.T) {
 	assert.Nil(t, err)
 
 	// check unmarshal result
-	var config TestStruct
+	var config testStruct
 	err = UnmarshalFile(jsonFile, &config)
 	assert.Nil(t, err)
 	assert.Equal(t, 1, config.T1)
@@ -42,4 +46,23 @@ func TestUnmarshalFile_Json(t *testing.T) {
 	// clean
 	err = os.Remove(jsonFile)
 	assert.Nil(t, err)
+}
+
+func TestUnmarshalFileConvey(t *testing.T) {
+	convey.Convey("Test UnmarshalFile", t, func() {
+		convey.Convey("reads and decodes mocked JSON", func() {
+			patches := gomonkey.ApplyFuncReturn(
+				ioutil.ReadFile,
+				[]byte(`{"T1":7,"T2":"mocked"}`),
+				nil,
+			)
+			defer patches.Reset()
+
+			var got testStruct
+			err := UnmarshalFile("mock.json", &got)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(got.T1, convey.ShouldEqual, 7)
+			convey.So(got.T2, convey.ShouldEqual, "mocked")
+		})
+	})
 }

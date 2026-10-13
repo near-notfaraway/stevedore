@@ -6,12 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
 	"github.com/sirupsen/logrus"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 type uploadStatsLogHook struct {
@@ -33,7 +36,7 @@ func (h *uploadStatsLogHook) Fire(entry *logrus.Entry) error {
 }
 
 func TestServerUploadStatsWithoutReactors(t *testing.T) {
-	require.Equal(t, UploadStats{}, (&Server{}).uploadStats())
+	require.Equal(t, uploadStats{}, (&Server{}).uploadStats())
 }
 
 func TestNewServerUsesSingleReactorWithoutReusePortSharding(t *testing.T) {
@@ -68,28 +71,28 @@ func TestNewServerUsesSingleReactorWithoutReusePortSharding(t *testing.T) {
 }
 
 func TestAddUploadStatsAggregatesAllCounters(t *testing.T) {
-	total := UploadStats{
-		Route: sd_route.Stats{
+	total := uploadStats{
+		route: sd_route.Stats{
 			Routes:        []sd_route.RouteStats{{ID: 0, Name: "route", Matches: 1}},
 			DefaultRoutes: 2,
 			ShortPayloads: 3,
 			Drops:         4,
 		},
-		Upstreams: []sd_upstream.Stats{{
+		upstreams: []sd_upstream.Stats{{
 			Name:              "upstream",
 			Selections:        5,
 			SelectionFailures: 6,
 			PeerFailures:      7,
 		}},
 	}
-	current := UploadStats{
-		Route: sd_route.Stats{
+	current := uploadStats{
+		route: sd_route.Stats{
 			Routes:        []sd_route.RouteStats{{ID: 0, Name: "route", Matches: 10}},
 			DefaultRoutes: 20,
 			ShortPayloads: 30,
 			Drops:         40,
 		},
-		Upstreams: []sd_upstream.Stats{{
+		upstreams: []sd_upstream.Stats{{
 			Name:              "upstream",
 			Selections:        50,
 			SelectionFailures: 60,
@@ -99,14 +102,14 @@ func TestAddUploadStatsAggregatesAllCounters(t *testing.T) {
 
 	addUploadStats(&total, current)
 
-	require.Equal(t, UploadStats{
-		Route: sd_route.Stats{
+	require.Equal(t, uploadStats{
+		route: sd_route.Stats{
 			Routes:        []sd_route.RouteStats{{ID: 0, Name: "route", Matches: 11}},
 			DefaultRoutes: 22,
 			ShortPayloads: 33,
 			Drops:         44,
 		},
-		Upstreams: []sd_upstream.Stats{{
+		upstreams: []sd_upstream.Stats{{
 			Name:              "upstream",
 			Selections:        55,
 			SelectionFailures: 66,
@@ -142,7 +145,7 @@ func TestServerLogsUploadStatsUntilContextCancelled(t *testing.T) {
 		uploadStatsInterval: time.Millisecond,
 	}
 	manager := registry.newManager()
-	server.reactors = []*Reactor{{upstreamMgr: manager}}
+	server.reactors = []*reactor{{upstreamMgr: manager}}
 	manager.routeUpstream([]byte{0x01})
 	upstreamName := manager.routeUpstream([]byte{0x02})
 	require.Equal(t, "default", upstreamName)
@@ -194,4 +197,78 @@ func TestServerLogsUploadStatsUntilContextCancelled(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("upload stats logger did not stop")
 	}
+}
+
+func TestNewServerConvey(t *testing.T) {
+	convey.Convey("Test NewServer", t, func() {
+		convey.Convey("builds configured reactors", func() {
+			patches := gomonkey.NewPatches()
+			patches.ApplyFuncReturn(sd_socket.ResolveUDPSockaddr, &unix.SockaddrInet4{})
+			patches.ApplyFunc(
+				newReactor,
+				func(id int, config *sd_config.Config, listenSa unix.Sockaddr, manager *uploadManager) (*reactor, error) {
+					return newConveyReactor(manager), nil
+				},
+			)
+			defer patches.Reset()
+			server := NewServer(&sd_config.Config{
+				Server:  &sd_config.ServerConfig{ListenAddr: "mock", ListenParallel: 1},
+				Upload:  &sd_config.UploadConfig{DefaultUpstream: sd_route.DropUpstream},
+				Session: &sd_config.SessionConfig{},
+			})
+			convey.So(server.reactors, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestServerRunUploadStatsLoggerConvey(t *testing.T) {
+	convey.Convey("Test Server.runUploadStatsLogger", t, func() {
+		convey.Convey("returns when disabled", func() {
+			server := &Server{}
+			server.runUploadStatsLogger(context.Background())
+			convey.So(server.uploadStatsInterval, convey.ShouldEqual, 0)
+		})
+	})
+}
+
+func TestServerLogUploadStatsConvey(t *testing.T) {
+	convey.Convey("Test Server.logUploadStats", t, func() {
+		convey.Convey("handles empty stats", func() {
+			convey.So(func() {
+				(&Server{}).logUploadStats()
+			}, convey.ShouldNotPanic)
+		})
+	})
+}
+
+func TestServerUploadStatsConvey(t *testing.T) {
+	convey.Convey("Test Server.uploadStats", t, func() {
+		convey.Convey("aggregates reactors", func() {
+			manager := newTestUploadManager(nil, sd_route.NewRouter("", nil, true))
+			manager.routeUpstream(nil)
+			server := &Server{reactors: []*reactor{{upstreamMgr: manager}, {upstreamMgr: manager}}}
+			convey.So(server.uploadStats().route.DefaultRoutes, convey.ShouldEqual, 2)
+		})
+	})
+}
+
+func TestServerListenAndServeConvey(t *testing.T) {
+	convey.Convey("Test Server.ListenAndServe", t, func() {
+		convey.Convey("waits for reactor completion", func() {
+			server := &Server{reactors: []*reactor{newConveyReactor(nil)}}
+			patches := gomonkey.ApplyFuncReturn(unix.Close, nil)
+			defer patches.Reset()
+			convey.So(server.ListenAndServe(), convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestAddUploadStatsConvey(t *testing.T) {
+	convey.Convey("Test addUploadStats", t, func() {
+		convey.Convey("sums counters", func() {
+			total := uploadStats{route: sd_route.Stats{DefaultRoutes: 1}}
+			addUploadStats(&total, uploadStats{route: sd_route.Stats{DefaultRoutes: 2}})
+			convey.So(total.route.DefaultRoutes, convey.ShouldEqual, 3)
+		})
+	})
 }

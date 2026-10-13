@@ -4,7 +4,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_util"
+	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -234,5 +237,168 @@ func TestNewRouterRejectsRouteWithoutConditions(t *testing.T) {
 				Upstream: "target",
 			},
 		}, false)
+	})
+}
+
+func TestNewRouterConvey(t *testing.T) {
+	convey.Convey("Test NewRouter", t, func() {
+		config := sd_config.RouteConfig{
+			Name: "matched",
+			Conditions: []sd_config.RouteConditionConfig{{
+				KeyBytes: "0:1",
+				Operator: sd_util.BytesOpEqual,
+				Value:    "0x01",
+			}},
+			Upstream: "target",
+		}
+		convey.Convey("builds routes and normalizes the drop target", func() {
+			router := NewRouter(DropUpstream, []sd_config.RouteConfig{config}, false)
+			convey.So(router.defaultUpstream, convey.ShouldBeEmpty)
+			convey.So(router.routes, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestRouterCloneConvey(t *testing.T) {
+	convey.Convey("Test Router.Clone", t, func() {
+		config := sd_config.RouteConfig{
+			Name: "matched",
+			Conditions: []sd_config.RouteConditionConfig{{
+				KeyBytes: "0:1",
+				Operator: sd_util.BytesOpEqual,
+				Value:    "0x01",
+			}},
+			Upstream: "target",
+		}
+		convey.Convey("shares immutable routes and isolates stats", func() {
+			router := NewRouter("default", []sd_config.RouteConfig{config}, true)
+			clone := router.Clone()
+			convey.So(clone.routes[0], convey.ShouldEqual, router.routes[0])
+			clone.Route([]byte{1})
+			convey.So(clone.Stats().Routes[0].Matches, convey.ShouldEqual, 1)
+			convey.So(router.Stats().Routes[0].Matches, convey.ShouldEqual, 0)
+		})
+	})
+}
+
+func TestRouterStatsConvey(t *testing.T) {
+	convey.Convey("Test Router.Stats", t, func() {
+		config := sd_config.RouteConfig{
+			Name: "matched",
+			Conditions: []sd_config.RouteConditionConfig{{
+				KeyBytes: "0:1",
+				Operator: sd_util.BytesOpEqual,
+				Value:    "0x01",
+			}},
+			Upstream: "target",
+		}
+		convey.Convey("snapshots atomic counters", func() {
+			router := NewRouter("default", []sd_config.RouteConfig{config}, true)
+			router.stats.routeMatches[0].Add(2)
+			stats := router.Stats()
+			convey.So(stats.Routes[0].Name, convey.ShouldEqual, "matched")
+			convey.So(stats.Routes[0].Matches, convey.ShouldEqual, 2)
+		})
+	})
+}
+
+func TestRouterRouteConvey(t *testing.T) {
+	convey.Convey("Test Router.Route", t, func() {
+		config := sd_config.RouteConfig{
+			Name: "matched",
+			Conditions: []sd_config.RouteConditionConfig{{
+				KeyBytes: "0:1",
+				Operator: sd_util.BytesOpEqual,
+				Value:    "0x01",
+			}},
+			Upstream: "target",
+		}
+		convey.Convey("uses the no-stats route path", func() {
+			router := NewRouter("default", []sd_config.RouteConfig{config}, false)
+			convey.So(router.Route([]byte{1}), convey.ShouldEqual, "target")
+			convey.So(router.Route([]byte{2}), convey.ShouldEqual, "default")
+		})
+	})
+}
+
+func TestRouterRouteWithStatsConvey(t *testing.T) {
+	convey.Convey("Test Router.routeWithStats", t, func() {
+		config := sd_config.RouteConfig{
+			Name: "matched",
+			Conditions: []sd_config.RouteConditionConfig{{
+				KeyBytes: "0:1",
+				Operator: sd_util.BytesOpEqual,
+				Value:    "0x01",
+			}},
+			Upstream: "target",
+		}
+		convey.Convey("records fallback metadata", func() {
+			router := NewRouter("", []sd_config.RouteConfig{config}, true)
+			convey.So(router.routeWithStats(nil), convey.ShouldBeEmpty)
+			stats := router.Stats()
+			convey.So(stats.DefaultRoutes, convey.ShouldEqual, 1)
+			convey.So(stats.ShortPayloads, convey.ShouldEqual, 1)
+			convey.So(stats.Drops, convey.ShouldEqual, 1)
+		})
+	})
+}
+
+func TestNewRouterStatsConvey(t *testing.T) {
+	convey.Convey("Test newRouterStats", t, func() {
+		convey.Convey("preserves route names and enabled state", func() {
+			stats := newRouterStats([]*route{{name: "first"}}, true)
+			convey.So(stats.enabled, convey.ShouldBeTrue)
+			convey.So(stats.routeNames, convey.ShouldResemble, []string{"first"})
+			convey.So(stats.routeMatches, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestNewRouteConvey(t *testing.T) {
+	convey.Convey("Test newRoute", t, func() {
+		config := sd_config.RouteConfig{
+			Name: "matched",
+			Conditions: []sd_config.RouteConditionConfig{{
+				KeyBytes: "0:1",
+				Operator: sd_util.BytesOpEqual,
+				Value:    "0x01",
+			}},
+			Upstream: "target",
+		}
+		convey.Convey("delegates condition construction", func() {
+			patches := gomonkey.ApplyFuncReturn(newCondition, condition{
+				operator:   sd_util.BytesOpEqual,
+				bytesStart: 0,
+				bytesEnd:   1,
+				bytesValue: []byte{1},
+			})
+			defer patches.Reset()
+
+			got := newRoute(3, sd_config.RouteConfig{
+				Conditions: config.Conditions,
+				Upstream:   DropUpstream,
+			})
+			convey.So(got.name, convey.ShouldEqual, "route-3")
+			convey.So(got.upstream, convey.ShouldBeEmpty)
+			convey.So(got.conditions, convey.ShouldHaveLength, 1)
+		})
+	})
+}
+
+func TestRouteMatchStatusConvey(t *testing.T) {
+	convey.Convey("Test route.matchStatus", t, func() {
+		convey.Convey("requires every condition", func() {
+			got := &route{conditions: []condition{
+				{operator: sd_util.BytesOpEqual, bytesStart: 0, bytesEnd: 1, bytesValue: []byte{1}},
+				{operator: sd_util.BytesOpEqual, bytesStart: 1, bytesEnd: 2, bytesValue: []byte{2}},
+			}}
+			matched, short := got.matchStatus([]byte{1, 2})
+			convey.So(matched, convey.ShouldBeTrue)
+			convey.So(short, convey.ShouldBeFalse)
+
+			matched, short = got.matchStatus([]byte{1})
+			convey.So(matched, convey.ShouldBeFalse)
+			convey.So(short, convey.ShouldBeTrue)
+		})
 	})
 }

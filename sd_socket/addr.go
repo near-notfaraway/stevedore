@@ -8,13 +8,13 @@ import (
 )
 
 const (
-	SizeofSockaddrInet4 = 0x10
-	SizeofSockaddrInet6 = 0x1c
+	sizeofSockaddrInet4 = 0x10
+	sizeofSockaddrInet6 = 0x1c
 )
 
 // Converts a net.UDPAddr to a Sockaddr
 // Returns nil if conversion fails
-func UDPAddrToSockaddr(addr *net.UDPAddr) unix.Sockaddr {
+func udpAddrToSockaddr(addr *net.UDPAddr) unix.Sockaddr {
 	// undefined IP address, use IPv6 default
 	if addr.IP == nil {
 		return &unix.SockaddrInet6{
@@ -124,18 +124,18 @@ func ResolveUDPSockaddr(strAddr string) unix.Sockaddr {
 		return nil
 	}
 
-	return UDPAddrToSockaddr(netAddr)
+	return udpAddrToSockaddr(netAddr)
 }
 
 // Converts a name buffer to a Sockaddr
 // Returns nil if conversion fails
-func NameBufferToSockaddr(buf []byte, nameLen uint32) unix.Sockaddr {
+func nameBufferToSockaddr(buf []byte, nameLen uint32) unix.Sockaddr {
 	if nameLen > uint32(len(buf)) {
 		return nil
 	}
 
 	switch nameLen {
-	case SizeofSockaddrInet4:
+	case sizeofSockaddrInet4:
 		var ip [4]byte
 		copy(ip[:], buf[4:8])
 		return &unix.SockaddrInet4{
@@ -143,7 +143,7 @@ func NameBufferToSockaddr(buf []byte, nameLen uint32) unix.Sockaddr {
 			Port: int(binary.BigEndian.Uint16(buf[2:4])),
 		}
 
-	case SizeofSockaddrInet6:
+	case sizeofSockaddrInet6:
 		var ip [16]byte
 		copy(ip[:], buf[8:24])
 		return &unix.SockaddrInet6{
@@ -159,28 +159,28 @@ func NameBufferToSockaddr(buf []byte, nameLen uint32) unix.Sockaddr {
 // Converts a Sockaddr to a name buffer
 // Returns nil if conversion fails
 // Returns the name buffer and the length of the buffer
-func SockaddrToNameBuffer(sa unix.Sockaddr) ([]byte, uint32) {
+func sockaddrToNameBuffer(sa unix.Sockaddr) ([]byte, uint32) {
 	switch addr := sa.(type) {
 	case *unix.SockaddrInet4:
 		if addr.Port < 0 || addr.Port > 0xffff {
 			return nil, 0
 		}
 
-		buf := make([]byte, SizeofSockaddrInet4)
+		buf := make([]byte, sizeofSockaddrInet4)
 		binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port))
 		copy(buf[4:8], addr.Addr[:])
-		return buf, SizeofSockaddrInet4
+		return buf, sizeofSockaddrInet4
 
 	case *unix.SockaddrInet6:
 		if addr.Port < 0 || addr.Port > 0xffff {
 			return nil, 0
 		}
 
-		buf := make([]byte, SizeofSockaddrInet6)
+		buf := make([]byte, sizeofSockaddrInet6)
 		binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port))
 		copy(buf[8:24], addr.Addr[:])
 		binary.BigEndian.PutUint32(buf[24:28], addr.ZoneId)
-		return buf, SizeofSockaddrInet6
+		return buf, sizeofSockaddrInet6
 	}
 
 	return nil, 0
@@ -188,13 +188,13 @@ func SockaddrToNameBuffer(sa unix.Sockaddr) ([]byte, uint32) {
 
 // Converts a name buffer to a net.UDPAddr
 // Returns nil if conversion fails
-func NameBufferToUDPAddr(buf []byte, nameLen uint32) *net.UDPAddr {
+func nameBufferToUDPAddr(buf []byte, nameLen uint32) *net.UDPAddr {
 	if nameLen > uint32(len(buf)) {
 		return nil
 	}
 
 	switch nameLen {
-	case SizeofSockaddrInet4:
+	case sizeofSockaddrInet4:
 		ip := make(net.IP, net.IPv4len)
 		copy(ip, buf[4:8])
 		return &net.UDPAddr{
@@ -202,7 +202,7 @@ func NameBufferToUDPAddr(buf []byte, nameLen uint32) *net.UDPAddr {
 			Port: int(binary.BigEndian.Uint16(buf[2:4])),
 		}
 
-	case SizeofSockaddrInet6:
+	case sizeofSockaddrInet6:
 		ip := make(net.IP, net.IPv6len)
 		copy(ip[:], buf[8:24])
 		return &net.UDPAddr{
@@ -218,10 +218,10 @@ func NameBufferToUDPAddr(buf []byte, nameLen uint32) *net.UDPAddr {
 // Converts a net.UDPAddr to a name buffer
 // Returns nil if conversion fails
 // Returns the name buffer and the length of the buffer
-func UDPAddrToNameBuffer(addr *net.UDPAddr) ([]byte, uint32) {
+func udpAddrToNameBuffer(addr *net.UDPAddr) ([]byte, uint32) {
 	if addr == nil {
 		return nil, 0
 	}
 
-	return SockaddrToNameBuffer(UDPAddrToSockaddr(addr))
+	return sockaddrToNameBuffer(udpAddrToSockaddr(addr))
 }

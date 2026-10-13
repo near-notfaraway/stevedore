@@ -13,24 +13,6 @@ type uploadRegistry struct {
 	router           *sd_route.Router
 }
 
-type upstreamRegistry struct {
-	definitions  []upstreamDefinition
-	statsEnabled bool
-}
-
-type upstreamDefinition struct {
-	name             string
-	upstreamType     string
-	keyExtractor     *sd_config.KeyExtractorConfig
-	invalidKeyPolicy string
-	group            *sd_upstream.PeerGroup
-}
-
-type UploadStats struct {
-	Route     sd_route.Stats
-	Upstreams []sd_upstream.Stats
-}
-
 func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) *uploadRegistry {
 	upstreamNames := make(map[string]struct{}, len(config.Upstreams))
 	for _, upstreamConfig := range config.Upstreams {
@@ -65,28 +47,16 @@ func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) *uploa
 	}
 }
 
-func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[string]struct{}) {
-	if config.DefaultUpstream != "" && config.DefaultUpstream != sd_route.DropUpstream {
-		if _, ok := upstreamNames[config.DefaultUpstream]; !ok {
-			panic(fmt.Sprintf("default upstream %q does not exist", config.DefaultUpstream))
-		}
-	}
-
-	for id, route := range config.Routes {
-		if route.Upstream == "" || route.Upstream == sd_route.DropUpstream {
-			continue
-		}
-		if _, ok := upstreamNames[route.Upstream]; !ok {
-			panic(fmt.Sprintf("upstream %q for route %d does not exist", route.Upstream, id))
-		}
-	}
-}
-
 func (r *uploadRegistry) newManager() *uploadManager {
 	return &uploadManager{
 		upstreamManager: r.upstreamRegistry.newManager(),
 		router:          r.router.Clone(),
 	}
+}
+
+type upstreamRegistry struct {
+	definitions  []upstreamDefinition
+	statsEnabled bool
 }
 
 func (r *upstreamRegistry) newManager() *sd_upstream.Manager {
@@ -97,6 +67,14 @@ func (r *upstreamRegistry) newManager() *sd_upstream.Manager {
 	return sd_upstream.NewManager(upstreams, r.statsEnabled)
 }
 
+type upstreamDefinition struct {
+	name             string
+	upstreamType     string
+	keyExtractor     *sd_config.KeyExtractorConfig
+	invalidKeyPolicy string
+	group            *sd_upstream.PeerGroup
+}
+
 func (u *upstreamDefinition) newUpstream() sd_upstream.Upstream {
 	return sd_upstream.NewUpstream(&sd_config.UpstreamConfig{
 		Name:             u.name,
@@ -104,6 +82,11 @@ func (u *upstreamDefinition) newUpstream() sd_upstream.Upstream {
 		KeyExtractor:     u.keyExtractor,
 		InvalidKeyPolicy: u.invalidKeyPolicy,
 	}, u.group)
+}
+
+type uploadStats struct {
+	route     sd_route.Stats
+	upstreams []sd_upstream.Stats
 }
 
 type uploadManager struct {
@@ -123,9 +106,26 @@ func (m *uploadManager) markPeerDead(upstreamName string, peer *sd_upstream.Peer
 	m.upstreamManager.MarkPeerDead(upstreamName, peer)
 }
 
-func (m *uploadManager) stats() UploadStats {
-	return UploadStats{
-		Route:     m.router.Stats(),
-		Upstreams: m.upstreamManager.Stats(),
+func (m *uploadManager) stats() uploadStats {
+	return uploadStats{
+		route:     m.router.Stats(),
+		upstreams: m.upstreamManager.Stats(),
+	}
+}
+
+func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[string]struct{}) {
+	if config.DefaultUpstream != "" && config.DefaultUpstream != sd_route.DropUpstream {
+		if _, ok := upstreamNames[config.DefaultUpstream]; !ok {
+			panic(fmt.Sprintf("default upstream %q does not exist", config.DefaultUpstream))
+		}
+	}
+
+	for id, route := range config.Routes {
+		if route.Upstream == "" || route.Upstream == sd_route.DropUpstream {
+			continue
+		}
+		if _, ok := upstreamNames[route.Upstream]; !ok {
+			panic(fmt.Sprintf("upstream %q for route %d does not exist", route.Upstream, id))
+		}
 	}
 }

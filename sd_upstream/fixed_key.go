@@ -61,6 +61,25 @@ func newFixedKeyExtractor(keyBytes, keyMask string) (*fixedKeyExtractor, error) 
 	}, nil
 }
 
+func (k *fixedKeyExtractor) extract(data []byte) ([]byte, bool) {
+	if len(data) < k.requiredPayloadLen {
+		return nil, false
+	}
+	if len(k.segments) == 1 && k.mask == nil {
+		segment := k.segments[0]
+		return data[segment.start:segment.end], true
+	}
+
+	offset := 0
+	for _, segment := range k.segments {
+		offset += copy(k.buf[offset:], data[segment.start:segment.end])
+	}
+	for i, mask := range k.mask {
+		k.buf[i] &= mask
+	}
+	return k.buf, true
+}
+
 func parsePayloadKeySegment(value string) (fixedKeySegment, error) {
 	bounds := strings.Split(value, ":")
 	if len(bounds) != 2 {
@@ -99,23 +118,4 @@ func parsePayloadKeyMask(value string, keyLen int) ([]byte, error) {
 		return nil, fmt.Errorf("key mask length %d does not match key length %d", len(mask), keyLen)
 	}
 	return mask, nil
-}
-
-func (k *fixedKeyExtractor) Extract(data []byte) ([]byte, bool) {
-	if len(data) < k.requiredPayloadLen {
-		return nil, false
-	}
-	if len(k.segments) == 1 && k.mask == nil {
-		segment := k.segments[0]
-		return data[segment.start:segment.end], true
-	}
-
-	offset := 0
-	for _, segment := range k.segments {
-		offset += copy(k.buf[offset:], data[segment.start:segment.end])
-	}
-	for i, mask := range k.mask {
-		k.buf[i] &= mask
-	}
-	return k.buf, true
 }

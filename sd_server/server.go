@@ -11,7 +11,7 @@ import (
 )
 
 type Server struct {
-	reactors            []*Reactor      // independent network shards
+	reactors            []*reactor      // independent network shards
 	uploadRegistry      *uploadRegistry // shared routing and upstream state
 	uploadStatsInterval time.Duration
 }
@@ -32,7 +32,7 @@ func NewServer(config *sd_config.Config) *Server {
 	}
 	statsEnabled := config.Log != nil && config.Log.UploadStatsIntervalSec > 0
 	s := &Server{
-		reactors:       make([]*Reactor, 0, parallel),
+		reactors:       make([]*reactor, 0, parallel),
 		uploadRegistry: newUploadRegistry(config.Upload, statsEnabled),
 	}
 	if statsEnabled {
@@ -70,12 +70,12 @@ func (s *Server) runUploadStatsLogger(ctx context.Context) {
 
 func (s *Server) logUploadStats() {
 	stats := s.uploadStats()
-	routes := make(map[string]uint64, len(stats.Route.Routes))
-	for _, route := range stats.Route.Routes {
+	routes := make(map[string]uint64, len(stats.route.Routes))
+	for _, route := range stats.route.Routes {
 		routes[route.Name] = route.Matches
 	}
-	upstreams := make(map[string]map[string]uint64, len(stats.Upstreams))
-	for _, upstream := range stats.Upstreams {
+	upstreams := make(map[string]map[string]uint64, len(stats.upstreams))
+	for _, upstream := range stats.upstreams {
 		upstreams[upstream.Name] = map[string]uint64{
 			"selections":         upstream.Selections,
 			"selection_failures": upstream.SelectionFailures,
@@ -83,17 +83,17 @@ func (s *Server) logUploadStats() {
 		}
 	}
 	logrus.WithFields(logrus.Fields{
-		"default_routes": stats.Route.DefaultRoutes,
-		"short_payloads": stats.Route.ShortPayloads,
-		"drops":          stats.Route.Drops,
+		"default_routes": stats.route.DefaultRoutes,
+		"short_payloads": stats.route.ShortPayloads,
+		"drops":          stats.route.Drops,
 		"routes":         routes,
 		"upstreams":      upstreams,
 	}).Info("upload stats")
 }
 
-func (s *Server) uploadStats() UploadStats {
+func (s *Server) uploadStats() uploadStats {
 	if len(s.reactors) == 0 {
-		return UploadStats{}
+		return uploadStats{}
 	}
 
 	stats := s.reactors[0].upstreamMgr.stats()
@@ -101,20 +101,6 @@ func (s *Server) uploadStats() UploadStats {
 		addUploadStats(&stats, reactor.upstreamMgr.stats())
 	}
 	return stats
-}
-
-func addUploadStats(total *UploadStats, current UploadStats) {
-	total.Route.DefaultRoutes += current.Route.DefaultRoutes
-	total.Route.ShortPayloads += current.Route.ShortPayloads
-	total.Route.Drops += current.Route.Drops
-	for i := range total.Route.Routes {
-		total.Route.Routes[i].Matches += current.Route.Routes[i].Matches
-	}
-	for i := range total.Upstreams {
-		total.Upstreams[i].Selections += current.Upstreams[i].Selections
-		total.Upstreams[i].SelectionFailures += current.Upstreams[i].SelectionFailures
-		total.Upstreams[i].PeerFailures += current.Upstreams[i].PeerFailures
-	}
 }
 
 func (s *Server) ListenAndServe() error {
@@ -126,10 +112,10 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	errCh := make(chan error, len(s.reactors))
-	for _, reactor := range s.reactors {
-		go func(r *Reactor) {
-			errCh <- r.Serve(ctx)
-		}(reactor)
+	for _, r := range s.reactors {
+		go func(r *reactor) {
+			errCh <- r.serve(ctx)
+		}(r)
 	}
 
 	firstErr := <-errCh
@@ -143,4 +129,18 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("reactor stopped: %w", firstErr)
 	}
 	return nil
+}
+
+func addUploadStats(total *uploadStats, current uploadStats) {
+	total.route.DefaultRoutes += current.route.DefaultRoutes
+	total.route.ShortPayloads += current.route.ShortPayloads
+	total.route.Drops += current.route.Drops
+	for i := range total.route.Routes {
+		total.route.Routes[i].Matches += current.route.Routes[i].Matches
+	}
+	for i := range total.upstreams {
+		total.upstreams[i].Selections += current.upstreams[i].Selections
+		total.upstreams[i].SelectionFailures += current.upstreams[i].SelectionFailures
+		total.upstreams[i].PeerFailures += current.upstreams[i].PeerFailures
+	}
 }
