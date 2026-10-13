@@ -21,8 +21,7 @@ type upstreamRegistry struct {
 type upstreamDefinition struct {
 	name             string
 	upstreamType     string
-	keyBytes         string
-	keyMask          string
+	keyExtractor     *sd_config.KeyExtractorConfig
 	invalidKeyPolicy string
 	group            *sd_upstream.PeerGroup
 }
@@ -50,8 +49,7 @@ func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) *uploa
 		definitions = append(definitions, upstreamDefinition{
 			name:             upstreamConfig.Name,
 			upstreamType:     upstreamConfig.Type,
-			keyBytes:         upstreamConfig.KeyBytes,
-			keyMask:          upstreamConfig.KeyMask,
+			keyExtractor:     upstreamConfig.KeyExtractor,
 			invalidKeyPolicy: upstreamConfig.InvalidKeyPolicy,
 			group:            sd_upstream.NewPeerGroup(upstreamConfig),
 		})
@@ -103,8 +101,7 @@ func (u *upstreamDefinition) newUpstream() sd_upstream.Upstream {
 	return sd_upstream.NewUpstream(&sd_config.UpstreamConfig{
 		Name:             u.name,
 		Type:             u.upstreamType,
-		KeyBytes:         u.keyBytes,
-		KeyMask:          u.keyMask,
+		KeyExtractor:     u.keyExtractor,
 		InvalidKeyPolicy: u.invalidKeyPolicy,
 	}, u.group)
 }

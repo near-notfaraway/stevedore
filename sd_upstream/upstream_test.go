@@ -32,6 +32,16 @@ func publishTestSnapshot(group *PeerGroup, version uint64, peers ...*Peer) {
 	})
 }
 
+func fixedKeyExtractorConfig(keyBytes, keyMask string) *sd_config.KeyExtractorConfig {
+	return &sd_config.KeyExtractorConfig{
+		Type: keyExtractorTypeFixed,
+		Fixed: &sd_config.FixedKeyConfig{
+			KeyBytes: keyBytes,
+			KeyMask:  keyMask,
+		},
+	}
+}
+
 func TestNewUpstream(t *testing.T) {
 	peer := testPeer("127.0.0.1:10001", 1)
 
@@ -47,8 +57,8 @@ func TestNewUpstream(t *testing.T) {
 	t.Run("chash", func(t *testing.T) {
 		upstream := NewUpstream(
 			&sd_config.UpstreamConfig{
-				Type:     UpstreamTypeCHash,
-				KeyBytes: "0:1",
+				Type:         UpstreamTypeCHash,
+				KeyExtractor: fixedKeyExtractorConfig("0:1", ""),
 			},
 			testPeerGroup(1, peer),
 		)
@@ -214,7 +224,10 @@ func TestNewCHashUpstreamRejectsInvalidKeyBytes(t *testing.T) {
 		t.Run(keyBytes, func(t *testing.T) {
 			require.Panics(t, func() {
 				NewCHashUpstream(
-					&sd_config.UpstreamConfig{Name: "test", KeyBytes: keyBytes},
+					&sd_config.UpstreamConfig{
+						Name:         "test",
+						KeyExtractor: fixedKeyExtractorConfig(keyBytes, ""),
+					},
 					group,
 				)
 			})
@@ -227,7 +240,10 @@ func TestNewCHashUpstreamRejectsNegativeKeyStart(t *testing.T) {
 
 	require.Panics(t, func() {
 		NewCHashUpstream(
-			&sd_config.UpstreamConfig{Name: "test", KeyBytes: "-1:2"},
+			&sd_config.UpstreamConfig{
+				Name:         "test",
+				KeyExtractor: fixedKeyExtractorConfig("-1:2", ""),
+			},
 			group,
 		)
 	})
@@ -237,7 +253,10 @@ func TestCHashUpstreamSelectPeerUsesConfiguredPayloadBytes(t *testing.T) {
 	first := testPeer("127.0.0.1:10001", 1)
 	second := testPeer("127.0.0.1:10002", 1)
 	upstream := NewCHashUpstream(
-		&sd_config.UpstreamConfig{Name: "test", KeyBytes: "1:3"},
+		&sd_config.UpstreamConfig{
+			Name:         "test",
+			KeyExtractor: fixedKeyExtractorConfig("1:3", ""),
+		},
 		testPeerGroup(1, first, second),
 	)
 
@@ -247,9 +266,107 @@ func TestCHashUpstreamSelectPeerUsesConfiguredPayloadBytes(t *testing.T) {
 	require.Same(t, selected, upstream.SelectPeer([]byte{0x00, 0x01, 0x02, 0x00}))
 }
 
+func TestCHashUpstreamSelectPeerUsesLengthFieldKey(t *testing.T) {
+	first := testPeer("127.0.0.1:10001", 1)
+	second := testPeer("127.0.0.1:10002", 1)
+	upstream := NewCHashUpstream(
+		&sd_config.UpstreamConfig{
+			Name: "test",
+			KeyExtractor: &sd_config.KeyExtractorConfig{
+				Type: "length_field",
+				LengthField: &sd_config.LengthFieldKeyConfig{
+					KeyStart:     2,
+					LengthStart:  0,
+					LengthBytes:  1,
+					ByteOrder:    "big",
+					MaxKeyLength: 8,
+				},
+			},
+		},
+		testPeerGroup(1, first, second),
+	)
+	payload := []byte{0x03, 0xaa, 0x11, 0x22, 0x33}
+
+	require.Same(t, upstream.cHash.SelectPeer([]byte{0x11, 0x22, 0x33}), upstream.SelectPeer(payload))
+}
+
+func TestNewCHashUpstreamRejectsMismatchedKeyExtractorConfig(t *testing.T) {
+	lengthField := &sd_config.LengthFieldKeyConfig{
+		KeyStart:     2,
+		LengthStart:  0,
+		LengthBytes:  1,
+		ByteOrder:    "big",
+		MaxKeyLength: 8,
+	}
+	tests := map[string]*sd_config.KeyExtractorConfig{
+		"fixed with length field": {
+			Type:        "fixed",
+			Fixed:       &sd_config.FixedKeyConfig{KeyBytes: "0:4"},
+			LengthField: lengthField,
+		},
+		"length field with fixed": {
+			Type:        "length_field",
+			Fixed:       &sd_config.FixedKeyConfig{KeyBytes: "0:4"},
+			LengthField: lengthField,
+		},
+	}
+
+	for name, keyConfig := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Panics(t, func() {
+				NewCHashUpstream(
+					&sd_config.UpstreamConfig{
+						Name:         "test",
+						KeyExtractor: keyConfig,
+					},
+					testPeerGroup(1, testPeer("127.0.0.1:10001", 1)),
+				)
+			})
+		})
+	}
+}
+
+func TestNewCHashUpstreamRequiresKeyExtractor(t *testing.T) {
+	require.Panics(t, func() {
+		NewCHashUpstream(
+			&sd_config.UpstreamConfig{
+				Name: "test",
+			},
+			testPeerGroup(1, testPeer("127.0.0.1:10001", 1)),
+		)
+	})
+}
+
+func TestNewCHashUpstreamRejectsInvalidKeyExtractor(t *testing.T) {
+	tests := map[string]*sd_config.KeyExtractorConfig{
+		"missing type": {},
+		"unknown type": {Type: "unknown"},
+		"missing fixed config": {
+			Type: "fixed",
+		},
+		"missing length field config": {
+			Type: "length_field",
+		},
+	}
+
+	for name, keyConfig := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Panics(t, func() {
+				NewCHashUpstream(
+					&sd_config.UpstreamConfig{Name: "test", KeyExtractor: keyConfig},
+					testPeerGroup(1, testPeer("127.0.0.1:10001", 1)),
+				)
+			})
+		})
+	}
+}
+
 func TestCHashUpstreamSelectPeerReturnsNilForShortPayload(t *testing.T) {
 	upstream := NewCHashUpstream(
-		&sd_config.UpstreamConfig{Name: "test", KeyBytes: "1:3"},
+		&sd_config.UpstreamConfig{
+			Name:         "test",
+			KeyExtractor: fixedKeyExtractorConfig("1:3", ""),
+		},
 		testPeerGroup(1, testPeer("127.0.0.1:10001", 1)),
 	)
 
@@ -261,7 +378,7 @@ func TestCHashUpstreamSelectPeerFallsBackToRRForShortPayload(t *testing.T) {
 	upstream := NewCHashUpstream(
 		&sd_config.UpstreamConfig{
 			Name:             "test",
-			KeyBytes:         "1:3",
+			KeyExtractor:     fixedKeyExtractorConfig("1:3", ""),
 			InvalidKeyPolicy: InvalidKeyPolicyRR,
 		},
 		testPeerGroup(1, peer),
@@ -275,7 +392,7 @@ func TestNewCHashUpstreamRejectsInvalidKeyPolicy(t *testing.T) {
 		NewCHashUpstream(
 			&sd_config.UpstreamConfig{
 				Name:             "test",
-				KeyBytes:         "0:1",
+				KeyExtractor:     fixedKeyExtractorConfig("0:1", ""),
 				InvalidKeyPolicy: "invalid",
 			},
 			testPeerGroup(1, testPeer("127.0.0.1:10001", 1)),
@@ -285,7 +402,10 @@ func TestNewCHashUpstreamRejectsInvalidKeyPolicy(t *testing.T) {
 
 func TestCHashUpstreamSelectPeerReturnsNilForEmptySnapshot(t *testing.T) {
 	upstream := NewCHashUpstream(
-		&sd_config.UpstreamConfig{Name: "test", KeyBytes: "0:1"},
+		&sd_config.UpstreamConfig{
+			Name:         "test",
+			KeyExtractor: fixedKeyExtractorConfig("0:1", ""),
+		},
 		testPeerGroup(1),
 	)
 
@@ -297,7 +417,10 @@ func TestCHashUpstreamSelectPeerSyncsNewSnapshot(t *testing.T) {
 	second := testPeer("127.0.0.1:10002", 1)
 	group := testPeerGroup(1, first)
 	upstream := NewCHashUpstream(
-		&sd_config.UpstreamConfig{Name: "test", KeyBytes: "0:1"},
+		&sd_config.UpstreamConfig{
+			Name:         "test",
+			KeyExtractor: fixedKeyExtractorConfig("0:1", ""),
+		},
 		group,
 	)
 	require.Same(t, first, upstream.SelectPeer([]byte{0x01}))

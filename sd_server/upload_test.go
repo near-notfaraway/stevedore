@@ -130,6 +130,35 @@ func TestUploadRegistryNewManager(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestUploadRegistryPreservesLengthFieldKeyExtractorConfig(t *testing.T) {
+	registry := newUploadRegistry(&sd_config.UploadConfig{
+		DefaultUpstream: "default",
+		Upstreams: []*sd_config.UpstreamConfig{
+			{
+				Name: "default",
+				Type: sd_upstream.UpstreamTypeCHash,
+				KeyExtractor: &sd_config.KeyExtractorConfig{
+					Type: "length_field",
+					LengthField: &sd_config.LengthFieldKeyConfig{
+						KeyStart:     2,
+						LengthStart:  0,
+						LengthBytes:  1,
+						ByteOrder:    "big",
+						MaxKeyLength: 8,
+					},
+				},
+				HealthChecker: &sd_config.HealthCheckerConfig{
+					HeartbeatIntervalSec: 3600,
+				},
+			},
+		},
+	}, false)
+
+	require.NotPanics(t, func() {
+		registry.newManager()
+	})
+}
+
 func TestUploadManagerStatsIncludeRouteStats(t *testing.T) {
 	registry := newUploadRegistry(&sd_config.UploadConfig{
 		DefaultUpstream: sd_route.DropUpstream,

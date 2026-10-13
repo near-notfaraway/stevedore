@@ -3,7 +3,7 @@
 ## 简介
 Stevedore 实现了一个四层负载均衡，并且可根据四层数据包的字节内容进行灵活地转发，其主要特点有：
 
-- 四层协议目前支持 UDP，也可应用于 KCP、QUIC、TFTP 协议，或基于 UDP 的一些私有协议
+- 四层协议目前支持 UDP，也可应用于 KCP、TFTP 协议，或基于 UDP 的一些私有协议
 - 支持 IPv4、IPv6 UDP 监听和后端转发，同一 Session 可访问不同地址族的后端
 - 数据包的上游选择，支持基于字节进行匹配，甚至基于比特来进行匹配
 - 数据包的负载均衡，支持组合多个字节区间并通过掩码提取 hash key
@@ -116,8 +116,8 @@ key。以 KCP 为例，其报文结构如下：
 ```
 
 `conv` 是位于 `data[0:4]` 的连接 ID。KCP 使用它标识逻辑连接，因此同一 `conv` 的数据包
-需要持续转发到同一节点。对于连接 ID 位置或长度可变的协议，需要先确保目标报文具有可供
-`KeyBytes` 固定提取的布局。
+需要持续转发到同一节点。固定布局和由报文长度字段确定边界的 key 都通过
+`KeyExtractor` 配置。
 
 #### 转发效果
 使用 `conv` 作为 `chash` key 后，在可用 Peer 集合不变时，相同 `conv` 会选择相同的后端，
@@ -134,7 +134,12 @@ key。以 KCP 为例，其报文结构如下：
     {
       "Name": "kcp",
       "Type": "chash",              // 一致性哈希
-      "KeyBytes": "0:4",            // 使用 data[0:4] 作为 hash key
+      "KeyExtractor": {
+        "Type": "fixed",
+        "Fixed": {
+          "KeyBytes": "0:4"         // 使用 data[0:4] 作为 hash key
+        }
+      },
       "InvalidKeyPolicy": "drop",   // payload 过短时丢弃
       "HealthChecker": {
         "HeartbeatIntervalSec": 5,
@@ -166,6 +171,52 @@ key。以 KCP 为例，其报文结构如下：
   ]
 }
 ```
+
+### 可变长业务字段
+对于 key 长度由报文字段描述的协议，可以使用 `length_field` extractor。假设
+`data[1:3]` 是大端无符号长度，key 从 `data[4]` 开始：
+
+``` json
+{
+  "Name": "variable-key",
+  "Type": "chash",
+  "KeyExtractor": {
+    "Type": "length_field",
+    "LengthField": {
+      "KeyStart": 4,
+      "LengthStart": 1,
+      "LengthBytes": 2,
+      "ByteOrder": "big",
+      "MaxKeyLength": 64
+    }
+  },
+  "InvalidKeyPolicy": "drop",
+  "HealthChecker": {
+    "HeartbeatIntervalSec": 5,
+    "HeartbeatTimeoutSec": 3,
+    "SuccessTimes": 1,
+    "FailedTimes": 1
+  },
+  "Peers": [
+    {
+      "IP": "10.0.0.1",
+      "Port": 2345,
+      "Weight": 1,
+      "Backup": true
+    },
+    {
+      "IP": "10.0.0.2",
+      "Port": 2345,
+      "Weight": 1,
+      "Backup": false
+    }
+  ]
+}
+```
+
+`LengthBytes` 支持 1、2 或 4，`ByteOrder` 支持 `"big"` 和 `"little"`。
+长度字段缺失、key 为空、key 超过 `MaxKeyLength` 或 payload 无法容纳完整 key 时，
+按无效 key 处理。`KeyExtractor.Type` 必须与 `Fixed` 或 `LengthField` 配置匹配。
 
 ### 协议版本兼容
 #### 场景说明
@@ -285,7 +336,7 @@ key。以 KCP 为例，其报文结构如下：
 `tenant` 位于 `data[0:2]`，`device id` 位于 `data[8:12]`。
 
 #### 转发效果
-`KeyBytes` 按配置顺序拼接多个半开区间，本例使用
+`Fixed.KeyBytes` 按配置顺序拼接多个半开区间，本例使用
 `data[0:2] + data[8:12]` 作为 `chash` key。在可用 Peer 集合不变时，同一租户下的
 同一设备会稳定落到相同节点。该分片不依赖客户端源地址，因此客户端经过 NAT 或重新绑定
 端口后，业务归属仍保持不变。
@@ -298,7 +349,12 @@ key。以 KCP 为例，其报文结构如下：
     {
       "Name": "device",
       "Type": "chash",
-      "KeyBytes": "0:2,8:12",        // tenant id + device id
+      "KeyExtractor": {
+        "Type": "fixed",
+        "Fixed": {
+          "KeyBytes": "0:2,8:12"     // tenant id + device id
+        }
+      },
       "InvalidKeyPolicy": "drop",
       "HealthChecker": {
         "HeartbeatIntervalSec": 5,
@@ -459,15 +515,18 @@ Operator 均保持零堆分配。
 
 `chash` 的 payload key 支持以下配置：
 
-- `KeyBytes`：一个或多个半开字节区间，多个区间使用逗号分隔并按配置顺序拼接。例如
-  `"0:2,4:6"` 提取 `data[0:2] + data[4:6]`。
-- `KeyMask`：可选的十六进制或二进制掩码，与拼接后的 key 逐字节按位 AND，长度必须
-  与 key 相同。例如 `"0xff0f00f0"`，或单字节位区间掩码 `"0b11110000"`。
+- `KeyExtractor.Type: "fixed"`：通过 `Fixed.KeyBytes` 配置一个或多个半开字节区间，
+  多个区间使用逗号分隔并按配置顺序拼接。例如 `"0:2,4:6"` 提取
+  `data[0:2] + data[4:6]`。可选的 `Fixed.KeyMask` 与拼接后的 key 逐字节按位 AND，
+  长度必须与 key 相同。
+- `KeyExtractor.Type: "length_field"`：从 `LengthField.LengthStart` 读取长度，再从
+  `LengthField.KeyStart` 提取可变长 key。
 - `InvalidKeyPolicy`：payload 长度不足时的处理策略。空值或 `"drop"` 返回无可用 Peer
-  并最终丢弃数据包；`"rr"` 回退到同一 Upstream 的加权轮询，但不再保证相同 key
-  落到同一节点。
+  并最终丢弃数据包；协议提取失败也执行相同策略。`"rr"` 回退到同一 Upstream 的
+  加权轮询，但不再保证相同 key 落到同一节点。
 
-无效区间、负数索引、掩码格式或长度不匹配、未知策略都会在启动时直接拒绝。
+无效区间、负数索引、掩码格式或长度不匹配、未知 extractor 类型和未知策略都会在
+启动时直接拒绝。
 
 每个 Upstream 最多有一个 Peer 可将 `Backup` 设为 `true`。该 Peer 健康时仍按其权重
 正常参与 RR/CHash；所有 Peer 都不可用时，无论其当时的健康状态如何，都会将它作为

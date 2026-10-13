@@ -10,21 +10,21 @@ import (
 
 const maxPayloadKeySize = 1 << 16
 
-type payloadKeySegment struct {
+type fixedKeySegment struct {
 	start int
 	end   int
 }
 
-type payloadKey struct {
-	segments           []payloadKeySegment
+type fixedKeyExtractor struct {
+	segments           []fixedKeySegment
 	mask               []byte
 	buf                []byte
 	requiredPayloadLen int
 }
 
-func newPayloadKey(keyBytes, keyMask string) (*payloadKey, error) {
+func newFixedKeyExtractor(keyBytes, keyMask string) (*fixedKeyExtractor, error) {
 	rawSegments := strings.Split(keyBytes, ",")
-	segments := make([]payloadKeySegment, 0, len(rawSegments))
+	segments := make([]fixedKeySegment, 0, len(rawSegments))
 	keyLen := 0
 	requiredPayloadLen := 0
 
@@ -53,7 +53,7 @@ func newPayloadKey(keyBytes, keyMask string) (*payloadKey, error) {
 	if len(segments) > 1 || mask != nil {
 		buf = make([]byte, keyLen)
 	}
-	return &payloadKey{
+	return &fixedKeyExtractor{
 		segments:           segments,
 		mask:               mask,
 		buf:                buf,
@@ -61,27 +61,27 @@ func newPayloadKey(keyBytes, keyMask string) (*payloadKey, error) {
 	}, nil
 }
 
-func parsePayloadKeySegment(value string) (payloadKeySegment, error) {
+func parsePayloadKeySegment(value string) (fixedKeySegment, error) {
 	bounds := strings.Split(value, ":")
 	if len(bounds) != 2 {
-		return payloadKeySegment{}, fmt.Errorf("key segment %q is invalid", value)
+		return fixedKeySegment{}, fmt.Errorf("key segment %q is invalid", value)
 	}
 
 	start, err := strconv.Atoi(bounds[0])
 	if err != nil {
-		return payloadKeySegment{}, fmt.Errorf("key start %q is invalid", bounds[0])
+		return fixedKeySegment{}, fmt.Errorf("key start %q is invalid", bounds[0])
 	}
 	end, err := strconv.Atoi(bounds[1])
 	if err != nil {
-		return payloadKeySegment{}, fmt.Errorf("key end %q is invalid", bounds[1])
+		return fixedKeySegment{}, fmt.Errorf("key end %q is invalid", bounds[1])
 	}
 	if start < 0 {
-		return payloadKeySegment{}, fmt.Errorf("key start %d is negative", start)
+		return fixedKeySegment{}, fmt.Errorf("key start %d is negative", start)
 	}
 	if start >= end {
-		return payloadKeySegment{}, fmt.Errorf("key start %d >= key end %d", start, end)
+		return fixedKeySegment{}, fmt.Errorf("key start %d >= key end %d", start, end)
 	}
-	return payloadKeySegment{start: start, end: end}, nil
+	return fixedKeySegment{start: start, end: end}, nil
 }
 
 func parsePayloadKeyMask(value string, keyLen int) ([]byte, error) {
@@ -101,7 +101,7 @@ func parsePayloadKeyMask(value string, keyLen int) ([]byte, error) {
 	return mask, nil
 }
 
-func (k *payloadKey) Extract(data []byte) ([]byte, bool) {
+func (k *fixedKeyExtractor) Extract(data []byte) ([]byte, bool) {
 	if len(data) < k.requiredPayloadLen {
 		return nil, false
 	}

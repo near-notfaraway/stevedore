@@ -159,12 +159,12 @@ type CHashUpstream struct {
 	group           *PeerGroup      // shared peer control plane
 	snapshotVersion uint64          // version used to build cHash
 	cHash           *ConsistentHash // reactor-local lookup table
-	key             *payloadKey     // extracts and masks the payload hash key
+	key             keyExtractor    // extracts the payload hash key
 	fallback        *RRUpstream     // optional fallback for invalid payload keys
 }
 
 func NewCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *CHashUpstream {
-	key, err := newPayloadKey(config.KeyBytes, config.KeyMask)
+	key, err := newKeyExtractor(config)
 	if err != nil {
 		logrus.Panicf("payload key is invalid in upstream %s: %v", config.Name, err)
 	}

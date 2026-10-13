@@ -41,11 +41,29 @@ type UploadConfig struct {
 type UpstreamConfig struct {
 	Name             string
 	Type             string
-	KeyBytes         string
-	KeyMask          string
+	KeyExtractor     *KeyExtractorConfig
 	InvalidKeyPolicy string
 	Peers            []*PeerConfig
 	HealthChecker    *HealthCheckerConfig
+}
+
+type KeyExtractorConfig struct {
+	Type        string
+	Fixed       *FixedKeyConfig
+	LengthField *LengthFieldKeyConfig
+}
+
+type FixedKeyConfig struct {
+	KeyBytes string
+	KeyMask  string
+}
+
+type LengthFieldKeyConfig struct {
+	KeyStart     int
+	LengthStart  int
+	LengthBytes  int
+	ByteOrder    string
+	MaxKeyLength int
 }
 
 type PeerConfig struct {

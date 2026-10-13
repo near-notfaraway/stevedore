@@ -7,7 +7,7 @@ import (
 )
 
 func TestPayloadKeyExtractCombinesSegments(t *testing.T) {
-	key, err := newPayloadKey("0:2,4:6", "")
+	key, err := newFixedKeyExtractor("0:2,4:6", "")
 	require.NoError(t, err)
 
 	got, ok := key.Extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56, 0x78})
@@ -17,7 +17,7 @@ func TestPayloadKeyExtractCombinesSegments(t *testing.T) {
 }
 
 func TestPayloadKeyExtractAppliesHexMask(t *testing.T) {
-	key, err := newPayloadKey("0:2,4:6", "0xff0f00f0")
+	key, err := newFixedKeyExtractor("0:2,4:6", "0xff0f00f0")
 	require.NoError(t, err)
 
 	got, ok := key.Extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56, 0x78})
@@ -27,7 +27,7 @@ func TestPayloadKeyExtractAppliesHexMask(t *testing.T) {
 }
 
 func TestPayloadKeyExtractAppliesBitMask(t *testing.T) {
-	key, err := newPayloadKey("0:1", "0b11110000")
+	key, err := newFixedKeyExtractor("0:1", "0b11110000")
 	require.NoError(t, err)
 
 	got, ok := key.Extract([]byte{0xab})
@@ -37,7 +37,7 @@ func TestPayloadKeyExtractAppliesBitMask(t *testing.T) {
 }
 
 func TestPayloadKeyExtractRejectsShortPayload(t *testing.T) {
-	key, err := newPayloadKey("0:2,4:6", "")
+	key, err := newFixedKeyExtractor("0:2,4:6", "")
 	require.NoError(t, err)
 
 	got, ok := key.Extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56})
@@ -47,7 +47,7 @@ func TestPayloadKeyExtractRejectsShortPayload(t *testing.T) {
 }
 
 func TestPayloadKeyExtractSingleSegmentWithoutCopy(t *testing.T) {
-	key, err := newPayloadKey("1:3", "")
+	key, err := newFixedKeyExtractor("1:3", "")
 	require.NoError(t, err)
 	data := []byte{0x00, 0x12, 0x34, 0x00}
 
@@ -73,14 +73,14 @@ func TestNewPayloadKeyRejectsInvalidSegments(t *testing.T) {
 
 	for _, keyBytes := range tests {
 		t.Run(keyBytes, func(t *testing.T) {
-			_, err := newPayloadKey(keyBytes, "")
+			_, err := newFixedKeyExtractor(keyBytes, "")
 			require.Error(t, err)
 		})
 	}
 }
 
 func TestNewPayloadKeyRejectsOversizedCombinedKey(t *testing.T) {
-	_, err := newPayloadKey("0:65536,0:1", "")
+	_, err := newFixedKeyExtractor("0:65536,0:1", "")
 
 	require.Error(t, err)
 }
@@ -96,7 +96,7 @@ func TestNewPayloadKeyRejectsInvalidMask(t *testing.T) {
 
 	for _, mask := range tests {
 		t.Run(mask, func(t *testing.T) {
-			_, err := newPayloadKey("0:1", mask)
+			_, err := newFixedKeyExtractor("0:1", mask)
 			require.Error(t, err)
 		})
 	}

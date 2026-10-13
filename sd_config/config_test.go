@@ -76,3 +76,30 @@ func TestLogConfigExposesUploadStatsInterval(t *testing.T) {
 	require.Equal(t, float64(60), logConfig["UploadStatsIntervalSec"])
 	require.NotContains(t, logConfig, "RouteStatsIntervalSec")
 }
+
+func TestUpstreamConfigNestsFixedKeyUnderExtractor(t *testing.T) {
+	config := UpstreamConfig{
+		Name: "fixed",
+		Type: "chash",
+		KeyExtractor: &KeyExtractorConfig{
+			Type: "fixed",
+			Fixed: &FixedKeyConfig{
+				KeyBytes: "0:2,4:6",
+				KeyMask:  "0xffffffff",
+			},
+		},
+	}
+
+	encoded, err := json.Marshal(config)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+
+	require.NotContains(t, decoded, "KeyBytes")
+	require.NotContains(t, decoded, "KeyMask")
+	extractor := decoded["KeyExtractor"].(map[string]any)
+	require.Equal(t, "fixed", extractor["Type"])
+	fixed := extractor["Fixed"].(map[string]any)
+	require.Equal(t, "0:2,4:6", fixed["KeyBytes"])
+	require.Equal(t, "0xffffffff", fixed["KeyMask"])
+}
