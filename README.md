@@ -452,9 +452,10 @@ payload 路由支持以下配置：
 ```
 
 未知 Operator、非法字节区间、重复路由名称以及不存在的 Upstream 引用都会在
-启动时直接拒绝。`Log.RouteStatsIntervalSec` 大于 0 时，Server 按该秒数周期输出每条
-路由命中数、默认命中数、短报文数和丢弃数的累计日志；值小于等于 0 时关闭统计，不执行
-热路径原子计数。路由匹配本身对所有 Operator 均保持零堆分配。
+启动时直接拒绝。`Log.UploadStatsIntervalSec` 大于 0 时，Server 按该秒数周期输出
+路由命中、默认命中、短报文、丢弃，以及各 Upstream 的路由、Peer 选择成功、选择失败
+和 Peer 故障累计数；值小于等于 0 时关闭统计，不累计热路径计数。路由匹配本身对所有
+Operator 均保持零堆分配。
 
 `chash` 的 payload key 支持以下配置：
 

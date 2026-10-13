@@ -58,10 +58,10 @@ func TestRouteConfigUsesUpstreamAsOnlyRoutingTarget(t *testing.T) {
 	require.Equal(t, "0x80", condition["Mask"])
 }
 
-func TestLogConfigExposesRouteStatsInterval(t *testing.T) {
+func TestLogConfigExposesUploadStatsInterval(t *testing.T) {
 	raw := []byte(`{
 		"Log": {
-			"RouteStatsIntervalSec": 60
+			"UploadStatsIntervalSec": 60
 		}
 	}`)
 	var config Config
@@ -73,5 +73,6 @@ func TestLogConfigExposesRouteStatsInterval(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 
 	logConfig := decoded["Log"].(map[string]any)
-	require.Equal(t, float64(60), logConfig["RouteStatsIntervalSec"])
+	require.Equal(t, float64(60), logConfig["UploadStatsIntervalSec"])
+	require.NotContains(t, logConfig, "RouteStatsIntervalSec")
 }

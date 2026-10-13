@@ -1,84 +1,96 @@
 package sd_upstream
 
 import (
-	"fmt"
-
-	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/near-notfaraway/stevedore/sd_route"
+	"sort"
+	"sync/atomic"
 )
 
-type Registry struct {
-	configs []*sd_config.UpstreamConfig // immutable upstream definitions
-	groups  map[string]*PeerGroup       // shared peer control planes
-	router  *sd_route.Router            // immutable payload router
-}
-
-func NewRegistry(config *sd_config.UploadConfig) *Registry {
-	upstreamNames := make(map[string]struct{}, len(config.Upstreams))
-	for _, upstreamConfig := range config.Upstreams {
-		if upstreamConfig.Name == "" || upstreamConfig.Name == sd_route.DropUpstream {
-			panic(fmt.Sprintf("upstream name %q is reserved", upstreamConfig.Name))
-		}
-		if _, ok := upstreamNames[upstreamConfig.Name]; ok {
-			panic(fmt.Sprintf("upstream name %q is duplicated", upstreamConfig.Name))
-		}
-		upstreamNames[upstreamConfig.Name] = struct{}{}
-	}
-	validateUpstreamTargets(config, upstreamNames)
-
-	groups := make(map[string]*PeerGroup, len(config.Upstreams))
-	for _, upstreamConfig := range config.Upstreams {
-		groups[upstreamConfig.Name] = NewPeerGroup(upstreamConfig)
-	}
-
-	return &Registry{
-		configs: config.Upstreams,
-		groups:  groups,
-		router:  sd_route.NewRouter(config.DefaultUpstream, config.Routes),
-	}
-}
-
-func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[string]struct{}) {
-	if config.DefaultUpstream != "" && config.DefaultUpstream != sd_route.DropUpstream {
-		if _, ok := upstreamNames[config.DefaultUpstream]; !ok {
-			panic(fmt.Sprintf("default upstream %q does not exist", config.DefaultUpstream))
-		}
-	}
-
-	for id, route := range config.Routes {
-		if route.Upstream == "" || route.Upstream == sd_route.DropUpstream {
-			continue
-		}
-		if _, ok := upstreamNames[route.Upstream]; !ok {
-			panic(fmt.Sprintf("upstream %q for route %d does not exist", route.Upstream, id))
-		}
-	}
-}
-
-func (r *Registry) NewManager() *Manager {
-	upstreams := make(map[string]Upstream, len(r.configs))
-	for _, config := range r.configs {
-		upstreams[config.Name] = NewUpstream(config, r.groups[config.Name])
-	}
-	return &Manager{
-		upstreams: upstreams,
-		router:    r.router,
-	}
-}
-
-func (r *Registry) RouteStats() sd_route.Stats {
-	return r.router.Stats()
-}
-
-func (r *Registry) EnableRouteStats() {
-	r.router.EnableStats()
-}
-
 type Manager struct {
-	upstreams map[string]Upstream // reactor-local upstream selectors
-	router    *sd_route.Router    // immutable payload router
+	upstreams   []Upstream
+	upstreamIDs map[string]int
+	stats       *managerStats
 }
 
-func (m *Manager) RouteUpstream(data []byte) Upstream {
-	return m.upstreams[m.router.Route(data)]
+type managerStats struct {
+	enabled bool
+	names   []string
+	stats   []upstreamStats
+}
+
+type upstreamStats struct {
+	selections        atomic.Uint64
+	selectionFailures atomic.Uint64
+	peerFailures      atomic.Uint64
+}
+
+type Stats struct {
+	Name              string
+	Selections        uint64
+	SelectionFailures uint64
+	PeerFailures      uint64
+}
+
+func NewManager(upstreamsByName map[string]Upstream, statsEnabled bool) *Manager {
+	names := make([]string, 0, len(upstreamsByName))
+	for name := range upstreamsByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	manager := &Manager{
+		upstreams:   make([]Upstream, len(names)),
+		upstreamIDs: make(map[string]int, len(names)),
+		stats: &managerStats{
+			enabled: statsEnabled,
+			names:   names,
+			stats:   make([]upstreamStats, len(names)),
+		},
+	}
+	for id, name := range names {
+		manager.upstreams[id] = upstreamsByName[name]
+		manager.upstreamIDs[name] = id
+	}
+	return manager
+}
+
+func (m *Manager) SelectPeer(name string, data []byte) (*Peer, bool) {
+	id, ok := m.upstreamIDs[name]
+	if !ok {
+		return nil, false
+	}
+	peer := m.upstreams[id].SelectPeer(data)
+	if m.stats.enabled {
+		stats := &m.stats.stats[id]
+		if peer == nil {
+			stats.selectionFailures.Add(1)
+		} else {
+			stats.selections.Add(1)
+		}
+	}
+	return peer, true
+}
+
+func (m *Manager) MarkPeerDead(name string, peer *Peer) {
+	id, ok := m.upstreamIDs[name]
+	if !ok {
+		return
+	}
+	if m.stats.enabled {
+		m.stats.stats[id].peerFailures.Add(1)
+	}
+	m.upstreams[id].MarkPeerDead(peer)
+}
+
+func (m *Manager) Stats() []Stats {
+	stats := make([]Stats, len(m.stats.names))
+	for i, name := range m.stats.names {
+		stat := &m.stats.stats[i]
+		stats[i] = Stats{
+			Name:              name,
+			Selections:        stat.selections.Load(),
+			SelectionFailures: stat.selectionFailures.Load(),
+			PeerFailures:      stat.peerFailures.Load(),
+		}
+	}
+	return stats
 }

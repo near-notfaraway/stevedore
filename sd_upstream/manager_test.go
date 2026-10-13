@@ -1,187 +1,127 @@
 package sd_upstream
 
 import (
-	"fmt"
+	"sync"
 	"testing"
 
-	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/stretchr/testify/require"
 )
 
-type stubUpstream struct {
-	name string
+type managerStubUpstream struct {
+	peer     *Peer
+	deadPeer *Peer
 }
 
-func (u *stubUpstream) SelectPeer([]byte) *Peer {
-	return nil
+func (u *managerStubUpstream) SelectPeer([]byte) *Peer {
+	return u.peer
 }
 
-func (u *stubUpstream) MarkPeerDead(*Peer) {}
-
-func TestNewRegistryWithoutUpstreams(t *testing.T) {
-	config := &sd_config.UploadConfig{
-		DefaultUpstream: sd_route.DropUpstream,
-		Routes: []sd_config.RouteConfig{
-			{
-				Conditions: []sd_config.RouteConditionConfig{
-					{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-				},
-				Upstream: "",
-			},
-		},
-	}
-
-	registry := NewRegistry(config)
-
-	require.Empty(t, registry.configs)
-	require.Empty(t, registry.groups)
-	require.Empty(t, registry.router.Route([]byte{0x01}))
-	require.Empty(t, registry.router.Route([]byte{0x02}))
+func (u *managerStubUpstream) MarkPeerDead(peer *Peer) {
+	u.deadPeer = peer
 }
 
-func TestNewRegistryRejectsMissingDefaultUpstream(t *testing.T) {
-	require.PanicsWithValue(t, `default upstream "missing" does not exist`, func() {
-		NewRegistry(&sd_config.UploadConfig{
-			DefaultUpstream: "missing",
-		})
-	})
-}
+func TestManagerSelectsPeerAndRecordsStats(t *testing.T) {
+	peer := &Peer{}
+	manager := NewManager(map[string]Upstream{
+		"default": &managerStubUpstream{peer: peer},
+	}, true)
 
-func TestNewRegistryRejectsMissingRouteUpstream(t *testing.T) {
-	require.PanicsWithValue(t, `upstream "missing" for route 0 does not exist`, func() {
-		NewRegistry(&sd_config.UploadConfig{
-			DefaultUpstream: "default",
-			Upstreams: []*sd_config.UpstreamConfig{
-				{Name: "default", Type: UpstreamTypeRR},
-			},
-			Routes: []sd_config.RouteConfig{
-				{
-					Conditions: []sd_config.RouteConditionConfig{
-						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-					},
-					Upstream: "missing",
-				},
-			},
-		})
-	})
-}
+	selected, ok := manager.SelectPeer("default", nil)
 
-func TestNewRegistryRejectsReservedDropUpstreamName(t *testing.T) {
-	for _, name := range []string{"", sd_route.DropUpstream} {
-		require.PanicsWithValue(t, fmt.Sprintf("upstream name %q is reserved", name), func() {
-			NewRegistry(&sd_config.UploadConfig{
-				DefaultUpstream: sd_route.DropUpstream,
-				Upstreams: []*sd_config.UpstreamConfig{
-					{Name: name, Type: UpstreamTypeRR},
-				},
-			})
-		})
-	}
-}
-
-func TestNewRegistryRejectsDuplicateUpstreamNames(t *testing.T) {
-	require.PanicsWithValue(t, `upstream name "default" is duplicated`, func() {
-		NewRegistry(&sd_config.UploadConfig{
-			DefaultUpstream: "default",
-			Upstreams: []*sd_config.UpstreamConfig{
-				{Name: "default", Type: UpstreamTypeRR},
-				{Name: "default", Type: UpstreamTypeRR},
-			},
-		})
-	})
-}
-
-func TestRegistryNewManager(t *testing.T) {
-	peer := testPeer("127.0.0.1:10001", 1)
-	config := &sd_config.UpstreamConfig{
-		Name: "default",
-		Type: UpstreamTypeRR,
-	}
-	registry := &Registry{
-		configs: []*sd_config.UpstreamConfig{config},
-		groups:  map[string]*PeerGroup{"default": testPeerGroup(1, peer)},
-		router:  sd_route.NewRouter("default", nil),
-	}
-
-	manager := registry.NewManager()
-
-	require.IsType(t, &RRUpstream{}, manager.upstreams["default"])
-	require.Same(t, manager.upstreams["default"], manager.RouteUpstream(nil))
-}
-
-func TestRegistryExposesRouteStats(t *testing.T) {
-	router := sd_route.NewRouter(sd_route.DropUpstream, nil)
-	registry := &Registry{router: router}
-
-	provider, ok := any(registry).(interface {
-		EnableRouteStats()
-		RouteStats() sd_route.Stats
-	})
 	require.True(t, ok)
-	provider.EnableRouteStats()
-	router.Route(nil)
-
-	stats := provider.RouteStats()
-	require.Equal(t, uint64(1), stats.DefaultMatches)
-	require.Equal(t, uint64(1), stats.Drops)
+	require.Same(t, peer, selected)
+	manager.MarkPeerDead("default", peer)
+	require.Equal(t, []Stats{
+		{Name: "default", Selections: 1, PeerFailures: 1},
+	}, manager.Stats())
 }
 
-func TestManagerRouteUpstreamUsesFirstMatchingRoute(t *testing.T) {
-	first := &stubUpstream{name: "first"}
-	second := &stubUpstream{name: "second"}
-	manager := &Manager{
-		upstreams: map[string]Upstream{
-			"first":  first,
-			"second": second,
-		},
-		router: sd_route.NewRouter("", []sd_config.RouteConfig{
-			{
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-				Upstream:   "first",
-			},
-			{
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-				Upstream:   "second",
-			},
-		}),
-	}
+func TestManagerReturnsFalseForUnknownUpstream(t *testing.T) {
+	manager := NewManager(nil, true)
 
-	require.Same(t, first, manager.RouteUpstream([]byte{0x01}))
+	peer, ok := manager.SelectPeer("missing", nil)
+	require.Nil(t, peer)
+	require.False(t, ok)
+	require.Empty(t, manager.Stats())
 }
 
-func TestManagerRouteUpstreamUsesDefaultWithoutMatch(t *testing.T) {
-	fallback := &stubUpstream{name: "default"}
-	manager := &Manager{
-		upstreams: map[string]Upstream{"default": fallback},
-		router: sd_route.NewRouter("default", []sd_config.RouteConfig{
-			{
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-				Upstream:   "target",
-			},
-		}),
-	}
+func TestManagerCountsSelectionFailures(t *testing.T) {
+	manager := NewManager(map[string]Upstream{
+		"default": &managerStubUpstream{},
+	}, true)
 
-	require.Same(t, fallback, manager.RouteUpstream([]byte{0x02}))
+	peer, ok := manager.SelectPeer("default", nil)
+
+	require.True(t, ok)
+	require.Nil(t, peer)
+	require.Equal(t, uint64(1), manager.Stats()[0].SelectionFailures)
 }
 
-func TestManagerRouteUpstreamStopsAtMissingFirstMatch(t *testing.T) {
-	second := &stubUpstream{name: "second"}
-	manager := &Manager{
-		upstreams: map[string]Upstream{
-			"second": second,
-		},
-		router: sd_route.NewRouter("", []sd_config.RouteConfig{
-			{
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-				Upstream:   "deny",
-			},
-			{
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-				Upstream:   "second",
-			},
-		}),
-	}
+func TestManagerStatsDisabled(t *testing.T) {
+	manager := NewManager(map[string]Upstream{
+		"default": &managerStubUpstream{},
+	}, false)
 
-	require.Nil(t, manager.RouteUpstream([]byte{0x01}))
+	_, ok := manager.SelectPeer("default", nil)
+	require.True(t, ok)
+	manager.MarkPeerDead("default", nil)
+
+	require.Equal(t, []Stats{{Name: "default"}}, manager.Stats())
+}
+
+func TestManagerPreservesStatsOrder(t *testing.T) {
+	firstPeer := &Peer{}
+	first := &managerStubUpstream{peer: firstPeer}
+	second := &managerStubUpstream{}
+	manager := NewManager(map[string]Upstream{
+		"second": second,
+		"first":  first,
+	}, true)
+
+	selected, ok := manager.SelectPeer("first", nil)
+	require.True(t, ok)
+	require.Same(t, firstPeer, selected)
+	selected, ok = manager.SelectPeer("second", nil)
+	require.True(t, ok)
+	require.Nil(t, selected)
+	manager.MarkPeerDead("first", firstPeer)
+
+	require.Equal(t, []Stats{
+		{Name: "first", Selections: 1, PeerFailures: 1},
+		{Name: "second", SelectionFailures: 1},
+	}, manager.Stats())
+	require.Same(t, firstPeer, first.deadPeer)
+}
+
+func TestManagerStatsConcurrentWithSelection(t *testing.T) {
+	const selections = 1000
+
+	manager := NewManager(map[string]Upstream{
+		"default": &managerStubUpstream{peer: &Peer{}},
+	}, true)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range selections {
+			manager.SelectPeer("default", nil)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range selections {
+			manager.Stats()
+		}
+	}()
+	wg.Wait()
+
+	require.Equal(t, uint64(selections), manager.Stats()[0].Selections)
+}
+
+func TestManagerMarkPeerDeadIgnoresUnknownUpstream(t *testing.T) {
+	manager := NewManager(nil, true)
+
+	require.NotPanics(t, func() {
+		manager.MarkPeerDead("missing", &Peer{})
+	})
 }

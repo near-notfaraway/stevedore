@@ -15,7 +15,7 @@ func TestRouterMatchesMaskedValue(t *testing.T) {
 			},
 			Upstream: "target",
 		},
-	})
+	}, false)
 
 	require.Equal(t, "target", router.Route([]byte{0x8f}))
 	require.Equal(t, "default", router.Route([]byte{0xcf}))
@@ -52,7 +52,7 @@ func TestRouterRouteDoesNotAllocate(t *testing.T) {
 					},
 					Upstream: "target",
 				},
-			})
+			}, false)
 			data := []byte{test.data}
 			var upstream string
 
@@ -75,7 +75,7 @@ func TestNewRouterRejectsInvalidOperator(t *testing.T) {
 				},
 				Upstream: "target",
 			},
-		})
+		}, false)
 	})
 }
 
@@ -89,7 +89,7 @@ func TestNewRouterRejectsMalformedKeyBytes(t *testing.T) {
 					},
 					Upstream: "target",
 				},
-			})
+			}, false)
 		})
 	}
 }
@@ -112,7 +112,7 @@ func TestNewRouterRejectsInvalidMaskSemantics(t *testing.T) {
 
 	for _, config := range tests {
 		require.Panics(t, func() {
-			NewRouter("default", []sd_config.RouteConfig{config})
+			NewRouter("default", []sd_config.RouteConfig{config}, false)
 		})
 	}
 }
@@ -129,7 +129,7 @@ func TestNewRouterRejectsInvalidConditionConfig(t *testing.T) {
 
 	for _, config := range tests {
 		require.Panics(t, func() {
-			NewRouter("", []sd_config.RouteConfig{config})
+			NewRouter("", []sd_config.RouteConfig{config}, false)
 		})
 	}
 }

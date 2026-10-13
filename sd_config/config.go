@@ -14,12 +14,12 @@ type PProfConfig struct {
 }
 
 type LogConfig struct {
-	Path                  string // log file path
-	Level                 string // log level
-	Verbose               bool   // log caller information
-	MaxAgeHour            int    // max age for clean up expired log
-	RotationTimeHour      int    // time interval of rotating log
-	RouteStatsIntervalSec int    // route stats log interval; disabled when <= 0
+	Path                   string // log file path
+	Level                  string // log level
+	Verbose                bool   // log caller information
+	MaxAgeHour             int    // max age for clean up expired log
+	RotationTimeHour       int    // time interval of rotating log
+	UploadStatsIntervalSec int    // upload stats log interval; disabled when <= 0
 }
 
 type ServerConfig struct {

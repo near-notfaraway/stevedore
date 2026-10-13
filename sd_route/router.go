@@ -13,21 +13,23 @@ const DropUpstream = "drop"
 type Router struct {
 	defaultUpstream string
 	routes          []*route
-	stats           routerStats
+	stats           *routerStats
 }
 
 type routerStats struct {
-	enabled        bool
-	defaultMatches atomic.Uint64
-	shortPayloads  atomic.Uint64
-	drops          atomic.Uint64
+	enabled       bool
+	routeNames    []string
+	routeMatches  []atomic.Uint64
+	defaultRoutes atomic.Uint64
+	shortPayloads atomic.Uint64
+	drops         atomic.Uint64
 }
 
 type Stats struct {
-	Routes         []RouteStats
-	DefaultMatches uint64
-	ShortPayloads  uint64
-	Drops          uint64
+	Routes        []RouteStats
+	DefaultRoutes uint64
+	ShortPayloads uint64
+	Drops         uint64
 }
 
 type RouteStats struct {
@@ -37,27 +39,24 @@ type RouteStats struct {
 }
 
 func (r *Router) Stats() Stats {
-	routes := make([]RouteStats, len(r.routes))
-	for i, route := range r.routes {
+	stats := r.stats
+	routes := make([]RouteStats, len(stats.routeNames))
+	for i, name := range stats.routeNames {
 		routes[i] = RouteStats{
 			ID:      i,
-			Name:    route.name,
-			Matches: route.statMatches.Load(),
+			Name:    name,
+			Matches: stats.routeMatches[i].Load(),
 		}
 	}
 	return Stats{
-		Routes:         routes,
-		DefaultMatches: r.stats.defaultMatches.Load(),
-		ShortPayloads:  r.stats.shortPayloads.Load(),
-		Drops:          r.stats.drops.Load(),
+		Routes:        routes,
+		DefaultRoutes: stats.defaultRoutes.Load(),
+		ShortPayloads: stats.shortPayloads.Load(),
+		Drops:         stats.drops.Load(),
 	}
 }
 
-func (r *Router) EnableStats() {
-	r.stats.enabled = true
-}
-
-func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig) *Router {
+func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig, statsEnabled bool) *Router {
 	routes := make([]*route, 0, len(configs))
 	names := make(map[string]struct{}, len(configs))
 	for id, config := range configs {
@@ -68,12 +67,33 @@ func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig) *Router 
 		names[route.name] = struct{}{}
 		routes = append(routes, route)
 	}
-	if isDropUpstream(defaultUpstream) {
+	if defaultUpstream == DropUpstream {
 		defaultUpstream = ""
 	}
 	return &Router{
 		defaultUpstream: defaultUpstream,
 		routes:          routes,
+		stats:           newRouterStats(routes, statsEnabled),
+	}
+}
+
+func (r *Router) Clone() *Router {
+	return &Router{
+		defaultUpstream: r.defaultUpstream,
+		routes:          r.routes,
+		stats:           newRouterStats(r.routes, r.stats.enabled),
+	}
+}
+
+func newRouterStats(routes []*route, enabled bool) *routerStats {
+	names := make([]string, len(routes))
+	for i, route := range routes {
+		names[i] = route.name
+	}
+	return &routerStats{
+		enabled:      enabled,
+		routeNames:   names,
+		routeMatches: make([]atomic.Uint64, len(routes)),
 	}
 }
 
@@ -93,32 +113,31 @@ func (r *Router) Route(data []byte) string {
 
 func (r *Router) routeWithStats(data []byte) string {
 	shortPayload := false
-	for _, route := range r.routes {
+	for i, route := range r.routes {
 		matched, short := route.matchStatus(data)
 		if matched {
-			route.statMatches.Add(1)
-			if isDropUpstream(route.upstream) {
+			r.stats.routeMatches[i].Add(1)
+			if route.upstream == "" {
 				r.stats.drops.Add(1)
 			}
 			return route.upstream
 		}
 		shortPayload = shortPayload || short
 	}
-	r.stats.defaultMatches.Add(1)
+	r.stats.defaultRoutes.Add(1)
 	if shortPayload {
 		r.stats.shortPayloads.Add(1)
 	}
-	if isDropUpstream(r.defaultUpstream) {
+	if r.defaultUpstream == "" {
 		r.stats.drops.Add(1)
 	}
 	return r.defaultUpstream
 }
 
 type route struct {
-	name        string
-	conditions  []condition
-	upstream    string
-	statMatches atomic.Uint64
+	name       string
+	conditions []condition
+	upstream   string
 }
 
 func newRoute(id int, config sd_config.RouteConfig) *route {
@@ -126,7 +145,7 @@ func newRoute(id int, config sd_config.RouteConfig) *route {
 	if name == "" {
 		name = "route-" + strconv.Itoa(id)
 	}
-	if isDropUpstream(config.Upstream) {
+	if config.Upstream == DropUpstream {
 		config.Upstream = ""
 	}
 
@@ -144,10 +163,6 @@ func newRoute(id int, config sd_config.RouteConfig) *route {
 		conditions: conditions,
 		upstream:   config.Upstream,
 	}
-}
-
-func isDropUpstream(upstream string) bool {
-	return upstream == "" || upstream == DropUpstream
 }
 
 func (r *route) matchStatus(data []byte) (bool, bool) {

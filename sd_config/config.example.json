@@ -9,7 +9,7 @@
     "Verbose": false,
     "MaxAgeHour": 24,
     "RotationTimeHour": 168,
-    "RouteStatsIntervalSec": 0
+    "UploadStatsIntervalSec": 0
   },
   "Server": {
     "ListenAddr": "0.0.0.0:2614",

@@ -33,11 +33,12 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
 4. Linux 下游地址由内核 `SO_REUSEPORT` 哈希稳定分配到 Reactor；macOS
    仅运行单 Reactor。Reactor 本地 Session 持有用于上游通信的 UDP fd，并
    注册到同一个 selector。
-5. `sd_upstream.Registry` 共享健康检查、版本化 Peer 快照和只读
-   `sd_route.Router`；每个 Reactor 拥有独立 `Manager`、RR 游标、RR 列表
-   和一致性哈希表。Router 按配置顺序检查路由，首个匹配项生效；没有匹配项
-   时使用 `DefaultUpstream`。空字符串和保留值 `drop` 表示丢弃，其他
-   Upstream 引用在启动时校验。
+5. `sd_server.uploadRegistry` 共享只读路由规则、健康检查和版本化 Peer
+   快照；每个 Reactor 拥有独立 Router、Upstream selector、RR 游标、RR
+   列表、一致性哈希表和统计计数器。Server 汇总各 Reactor 的统计快照。
+   Router 按配置顺序检查路由，首个匹配项生效；没有匹配项时使用
+   `DefaultUpstream`。空字符串和保留值 `drop` 表示丢弃，其他 Upstream
+   引用在启动时校验。
 6. 选中的 Upstream 通过加权轮询或一致性哈希选择健康 Peer，并发送数据包。
 7. 同一个 Reactor 批量读取 Session fd 的上游响应，通过自己的监听 fd
    发送回原始下游地址。Linux 的 TX iovec 直接引用当前 RX batch payload，
@@ -68,8 +69,8 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
   结构一致。
 - 优先使用扁平控制流：校验、调用、错误处理、返回或响应。
 - 保持路由顺序，因为首个匹配项生效属于既有行为契约。
-- Router 在 Reactor 间共享；匹配状态必须只读。仅当
-  `Log.RouteStatsIntervalSec > 0` 时启用并发安全指标计数。
+- Router 和 Upstream 统计状态归 Reactor 本地所有，Server 通过原子快照
+  聚合；仅当 `Log.UploadStatsIntervalSec > 0` 时启用指标计数。
 - 路由匹配热路径必须保持零堆分配；Upstream 名称必须唯一。
 - 将数据包切片视为有边界的输入，切片前必须检查长度。
 - Listener、Session fd、selector 注册、Reactor 本地映射和关闭必须由所属

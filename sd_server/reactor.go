@@ -9,7 +9,6 @@ import (
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
-	"github.com/near-notfaraway/stevedore/sd_upstream"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -27,7 +26,7 @@ type Reactor struct {
 	sessions       map[sd_socket.SockaddrKey]*sd_session.Session // downstream key to session
 	sessionsByFD   map[int]*sd_session.Session                   // upstream fd to session
 	sessionWheel   *sd_session.Wheel                             // reactor-local idle session time wheel
-	upstreamMgr    *sd_upstream.Manager                          // immutable routes and shared upstream state
+	upstreamMgr    *uploadManager                                // reactor-local upstream selectors and shared routes
 	rxMC           *sd_socket.MMsgContainer                      // reactor-local shared batch receive buffers
 	txMC           *sd_socket.SendMMsgContainer                  // reactor-local zero-copy batch send descriptors
 	readyFDs       []int                                         // reactor-local round-robin ready queue
@@ -37,7 +36,7 @@ type Reactor struct {
 	logger         *logrus.Entry                                 // reactor-scoped logger
 }
 
-func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *sd_upstream.Manager) (*Reactor, error) {
+func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *uploadManager) (*Reactor, error) {
 	eventSize := config.Server.EventSize
 	if eventSize < 1 {
 		eventSize = sd_socket.DefaultEventSize
@@ -179,14 +178,18 @@ func (r *Reactor) handleUploadPacket(index int, now int64) {
 		r.logger.Debugf("upload packet: data=%v", buf)
 	}
 
-	upstream := r.upstreamMgr.RouteUpstream(buf)
-	if upstream == nil {
+	upstreamName := r.upstreamMgr.routeUpstream(buf)
+	if upstreamName == "" {
 		r.logger.Info("can not route upstream")
 		return
 	}
 
 	for try := 0; try < r.config.Server.MaxTryTimes; try++ {
-		peer := upstream.SelectPeer(buf)
+		peer, ok := r.upstreamMgr.selectPeer(upstreamName, buf)
+		if !ok {
+			r.logger.Infof("upstream %s does not exist", upstreamName)
+			return
+		}
 		if peer == nil {
 			r.logger.Error("select peer failed")
 			continue
@@ -202,7 +205,7 @@ func (r *Reactor) handleUploadPacket(index int, now int64) {
 		}
 		r.logger.Warnf("upload to peer %s failed: %v", peer.GetAddr(), err)
 		if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
-			upstream.MarkPeerDead(peer)
+			r.upstreamMgr.markPeerDead(upstreamName, peer)
 		}
 	}
 	r.logger.Error("upload packet failed, drop it")
