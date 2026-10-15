@@ -1,7 +1,7 @@
 {
   "Common": {
     "WorkingDir": "./",
-    "PidFile": "./bin/stevedore.pid"
+    "PidPath": "./bin/stevedore.pid"
   },
   "PProf": {
     "Open": true,

@@ -1,7 +1,6 @@
 package sd_server
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
@@ -33,6 +32,44 @@ func newTestUploadManager(upstreams map[string]sd_upstream.Upstream, router *sd_
 	}
 }
 
+func mustNewRouter(
+	t testing.TB,
+	defaultUpstream string,
+	configs []sd_config.RouteConfig,
+	statsEnabled bool,
+) *sd_route.Router {
+	t.Helper()
+	router, err := sd_route.NewRouter(defaultUpstream, configs, statsEnabled)
+	require.NoError(t, err)
+	return router
+}
+
+func mustNewUploadRegistry(
+	t testing.TB,
+	config *sd_config.UploadConfig,
+	statsEnabled bool,
+) *uploadRegistry {
+	t.Helper()
+	registry, err := newUploadRegistry(config, statsEnabled)
+	require.NoError(t, err)
+	t.Cleanup(registry.close)
+	return registry
+}
+
+func mustNewUploadManager(t testing.TB, registry *uploadRegistry) *uploadManager {
+	t.Helper()
+	manager, err := registry.newManager()
+	require.NoError(t, err)
+	return manager
+}
+
+func mustNewPeer(t testing.TB, id int, addr string, config *sd_config.PeerConfig) *sd_upstream.Peer {
+	t.Helper()
+	peer, err := sd_upstream.NewPeer(id, addr, config)
+	require.NoError(t, err)
+	return peer
+}
+
 func TestNewUploadRegistryWithoutUpstreams(t *testing.T) {
 	config := &sd_config.UploadConfig{
 		DefaultUpstream: sd_route.DropUpstream,
@@ -46,8 +83,8 @@ func TestNewUploadRegistryWithoutUpstreams(t *testing.T) {
 		},
 	}
 
-	registry := newUploadRegistry(config, false)
-	manager := registry.newManager()
+	registry := mustNewUploadRegistry(t, config, false)
+	manager := mustNewUploadManager(t, registry)
 
 	require.Empty(t, registry.upstreamRegistry.definitions)
 	require.Empty(t, manager.routeUpstream([]byte{0x01}))
@@ -55,59 +92,63 @@ func TestNewUploadRegistryWithoutUpstreams(t *testing.T) {
 }
 
 func TestNewUploadRegistryRejectsMissingDefaultUpstream(t *testing.T) {
-	require.PanicsWithValue(t, `default upstream "missing" does not exist`, func() {
-		newUploadRegistry(&sd_config.UploadConfig{
-			DefaultUpstream: "missing",
-		}, false)
-	})
+	registry, err := newUploadRegistry(&sd_config.UploadConfig{
+		DefaultUpstream: "missing",
+	}, false)
+
+	require.Nil(t, registry)
+	require.EqualError(t, err, `default upstream "missing" does not exist`)
 }
 
 func TestNewUploadRegistryRejectsMissingRouteUpstream(t *testing.T) {
-	require.PanicsWithValue(t, `upstream "missing" for route 0 does not exist`, func() {
-		newUploadRegistry(&sd_config.UploadConfig{
-			DefaultUpstream: "default",
-			Upstreams: []*sd_config.UpstreamConfig{
-				{Name: "default", Type: sd_upstream.UpstreamTypeRR},
-			},
-			Routes: []sd_config.RouteConfig{
-				{
-					Conditions: []sd_config.RouteConditionConfig{
-						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-					},
-					Upstream: "missing",
+	registry, err := newUploadRegistry(&sd_config.UploadConfig{
+		DefaultUpstream: "default",
+		Upstreams: []*sd_config.UpstreamConfig{
+			{Name: "default", Type: sd_upstream.UpstreamTypeRR},
+		},
+		Routes: []sd_config.RouteConfig{
+			{
+				Conditions: []sd_config.RouteConditionConfig{
+					{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
 				},
+				Upstream: "missing",
 			},
-		}, false)
-	})
+		},
+	}, false)
+
+	require.Nil(t, registry)
+	require.EqualError(t, err, `upstream "missing" for route 0 does not exist`)
 }
 
 func TestNewUploadRegistryRejectsReservedDropUpstreamName(t *testing.T) {
 	for _, name := range []string{"", sd_route.DropUpstream} {
-		require.PanicsWithValue(t, fmt.Sprintf("upstream name %q is reserved", name), func() {
-			newUploadRegistry(&sd_config.UploadConfig{
-				DefaultUpstream: sd_route.DropUpstream,
-				Upstreams: []*sd_config.UpstreamConfig{
-					{Name: name, Type: sd_upstream.UpstreamTypeRR},
-				},
-			}, false)
-		})
+		registry, err := newUploadRegistry(&sd_config.UploadConfig{
+			DefaultUpstream: sd_route.DropUpstream,
+			Upstreams: []*sd_config.UpstreamConfig{
+				{Name: name, Type: sd_upstream.UpstreamTypeRR},
+			},
+		}, false)
+
+		require.Nil(t, registry)
+		require.EqualError(t, err, `upstream name "`+name+`" is reserved`)
 	}
 }
 
 func TestNewUploadRegistryRejectsDuplicateUpstreamNames(t *testing.T) {
-	require.PanicsWithValue(t, `upstream name "default" is duplicated`, func() {
-		newUploadRegistry(&sd_config.UploadConfig{
-			DefaultUpstream: "default",
-			Upstreams: []*sd_config.UpstreamConfig{
-				{Name: "default", Type: sd_upstream.UpstreamTypeRR},
-				{Name: "default", Type: sd_upstream.UpstreamTypeRR},
-			},
-		}, false)
-	})
+	registry, err := newUploadRegistry(&sd_config.UploadConfig{
+		DefaultUpstream: "default",
+		Upstreams: []*sd_config.UpstreamConfig{
+			{Name: "default", Type: sd_upstream.UpstreamTypeRR},
+			{Name: "default", Type: sd_upstream.UpstreamTypeRR},
+		},
+	}, false)
+
+	require.Nil(t, registry)
+	require.EqualError(t, err, `upstream name "default" is duplicated`)
 }
 
 func TestUploadRegistryNewManager(t *testing.T) {
-	registry := newUploadRegistry(&sd_config.UploadConfig{
+	registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 		DefaultUpstream: "default",
 		Upstreams: []*sd_config.UpstreamConfig{
 			{
@@ -115,13 +156,15 @@ func TestUploadRegistryNewManager(t *testing.T) {
 				Type: sd_upstream.UpstreamTypeRR,
 				HealthChecker: &sd_config.HealthCheckerConfig{
 					HeartbeatIntervalSec: 3600,
+					SuccessTimes:         1,
+					FailedTimes:          1,
 				},
 			},
 		},
 	}, false)
 
-	firstManager := registry.newManager()
-	secondManager := registry.newManager()
+	firstManager := mustNewUploadManager(t, registry)
+	secondManager := mustNewUploadManager(t, registry)
 
 	require.NotSame(t, firstManager.upstreamManager, secondManager.upstreamManager)
 	upstreamName := firstManager.routeUpstream(nil)
@@ -133,7 +176,7 @@ func TestUploadRegistryNewManager(t *testing.T) {
 }
 
 func TestUploadRegistryPreservesLengthFieldKeyExtractorConfig(t *testing.T) {
-	registry := newUploadRegistry(&sd_config.UploadConfig{
+	registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 		DefaultUpstream: "default",
 		Upstreams: []*sd_config.UpstreamConfig{
 			{
@@ -151,21 +194,23 @@ func TestUploadRegistryPreservesLengthFieldKeyExtractorConfig(t *testing.T) {
 				},
 				HealthChecker: &sd_config.HealthCheckerConfig{
 					HeartbeatIntervalSec: 3600,
+					SuccessTimes:         1,
+					FailedTimes:          1,
 				},
 			},
 		},
 	}, false)
 
 	require.NotPanics(t, func() {
-		registry.newManager()
+		mustNewUploadManager(t, registry)
 	})
 }
 
 func TestUploadManagerStatsIncludeRouteStats(t *testing.T) {
-	registry := newUploadRegistry(&sd_config.UploadConfig{
+	registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 		DefaultUpstream: sd_route.DropUpstream,
 	}, true)
-	manager := registry.newManager()
+	manager := mustNewUploadManager(t, registry)
 	manager.routeUpstream(nil)
 
 	stats := manager.stats().route
@@ -174,7 +219,7 @@ func TestUploadManagerStatsIncludeRouteStats(t *testing.T) {
 }
 
 func TestUploadManagerUpstreamStatsDisabledByDefault(t *testing.T) {
-	registry := newUploadRegistry(&sd_config.UploadConfig{
+	registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 		DefaultUpstream: "default",
 		Upstreams: []*sd_config.UpstreamConfig{
 			{
@@ -182,11 +227,13 @@ func TestUploadManagerUpstreamStatsDisabledByDefault(t *testing.T) {
 				Type: sd_upstream.UpstreamTypeRR,
 				HealthChecker: &sd_config.HealthCheckerConfig{
 					HeartbeatIntervalSec: 3600,
+					SuccessTimes:         1,
+					FailedTimes:          1,
 				},
 			},
 		},
 	}, false)
-	manager := registry.newManager()
+	manager := mustNewUploadManager(t, registry)
 	upstreamName := manager.routeUpstream(nil)
 	peer, ok := manager.selectPeer(upstreamName, nil)
 
@@ -204,7 +251,7 @@ func TestUploadManagerMarksPeerDead(t *testing.T) {
 		upstreamManager: sd_upstream.NewManager(map[string]sd_upstream.Upstream{
 			"default": upstream,
 		}, true),
-		router: sd_route.NewRouter("default", nil, true),
+		router: mustNewRouter(t, "default", nil, true),
 	}
 
 	manager.markPeerDead("default", peer)
@@ -214,7 +261,7 @@ func TestUploadManagerMarksPeerDead(t *testing.T) {
 }
 
 func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
-	registry := newUploadRegistry(&sd_config.UploadConfig{
+	registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 		DefaultUpstream: "default",
 		Upstreams: []*sd_config.UpstreamConfig{
 			{
@@ -222,13 +269,15 @@ func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
 				Type: sd_upstream.UpstreamTypeRR,
 				HealthChecker: &sd_config.HealthCheckerConfig{
 					HeartbeatIntervalSec: 3600,
+					SuccessTimes:         1,
+					FailedTimes:          1,
 				},
 			},
 		},
 	}, true)
 
-	firstManager := registry.newManager()
-	secondManager := registry.newManager()
+	firstManager := mustNewUploadManager(t, registry)
+	secondManager := mustNewUploadManager(t, registry)
 	firstName := firstManager.routeUpstream(nil)
 	firstPeer, ok := firstManager.selectPeer(firstName, nil)
 	require.True(t, ok)
@@ -248,10 +297,7 @@ func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
 	require.Equal(t, managerStats, secondManager.stats().upstreams)
 	server := &Server{
 		uploadRegistry: registry,
-		reactors: []*reactor{
-			{upstreamMgr: firstManager},
-			{upstreamMgr: secondManager},
-		},
+		uploadManagers: []*uploadManager{firstManager, secondManager},
 	}
 	require.Equal(t, []sd_upstream.Stats{
 		{
@@ -262,11 +308,11 @@ func TestServerAggregatesUpstreamStatsAcrossManagers(t *testing.T) {
 }
 
 func TestServerAggregatesRouteStatsAcrossManagers(t *testing.T) {
-	registry := newUploadRegistry(&sd_config.UploadConfig{
+	registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 		DefaultUpstream: sd_route.DropUpstream,
 	}, true)
-	first := registry.newManager()
-	second := registry.newManager()
+	first := mustNewUploadManager(t, registry)
+	second := mustNewUploadManager(t, registry)
 
 	first.routeUpstream(nil)
 	second.routeUpstream(nil)
@@ -277,10 +323,7 @@ func TestServerAggregatesRouteStatsAcrossManagers(t *testing.T) {
 	require.Equal(t, uint64(1), second.stats().route.Drops)
 	server := &Server{
 		uploadRegistry: registry,
-		reactors: []*reactor{
-			{upstreamMgr: first},
-			{upstreamMgr: second},
-		},
+		uploadManagers: []*uploadManager{first, second},
 	}
 	require.Equal(t, uint64(2), server.uploadStats().route.DefaultRoutes)
 	require.Equal(t, uint64(2), server.uploadStats().route.Drops)
@@ -295,7 +338,7 @@ func TestUploadManagerUsesFirstMatchingRoute(t *testing.T) {
 			"first":  first,
 			"second": second,
 		},
-		sd_route.NewRouter("", []sd_config.RouteConfig{
+		mustNewRouter(t, "", []sd_config.RouteConfig{
 			{
 				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
 				Upstream:   "first",
@@ -318,7 +361,7 @@ func TestUploadManagerUsesDefaultWithoutMatch(t *testing.T) {
 	fallback := &stubUpstream{name: "default", peer: peer}
 	manager := newTestUploadManager(
 		map[string]sd_upstream.Upstream{"default": fallback},
-		sd_route.NewRouter("default", []sd_config.RouteConfig{
+		mustNewRouter(t, "default", []sd_config.RouteConfig{
 			{
 				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
 				Upstream:   "target",
@@ -338,7 +381,7 @@ func TestUploadManagerStopsAtMissingFirstMatch(t *testing.T) {
 		map[string]sd_upstream.Upstream{
 			"second": second,
 		},
-		sd_route.NewRouter("", []sd_config.RouteConfig{
+		mustNewRouter(t, "", []sd_config.RouteConfig{
 			{
 				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
 				Upstream:   "deny",
@@ -358,15 +401,15 @@ func TestUploadManagerStopsAtMissingFirstMatch(t *testing.T) {
 func TestNewUploadRegistryConvey(t *testing.T) {
 	convey.Convey("Test newUploadRegistry", t, func() {
 		convey.Convey("builds router and definitions", func() {
-			patches := gomonkey.ApplyFuncReturn(
-				sd_upstream.NewPeerGroup,
-				&sd_upstream.PeerGroup{},
-			)
-			defer patches.Reset()
-			registry := newUploadRegistry(&sd_config.UploadConfig{
+			registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 				DefaultUpstream: "default",
 				Upstreams: []*sd_config.UpstreamConfig{{
 					Name: "default", Type: sd_upstream.UpstreamTypeRR,
+					HealthChecker: &sd_config.HealthCheckerConfig{
+						HeartbeatIntervalSec: 3600,
+						SuccessTimes:         1,
+						FailedTimes:          1,
+					},
 				}},
 			}, true)
 			convey.So(registry.router, convey.ShouldNotBeNil)
@@ -378,10 +421,10 @@ func TestNewUploadRegistryConvey(t *testing.T) {
 func TestUploadRegistryNewManagerConvey(t *testing.T) {
 	convey.Convey("Test uploadRegistry.newManager", t, func() {
 		convey.Convey("clones runtime state", func() {
-			registry := newUploadRegistry(&sd_config.UploadConfig{
+			registry := mustNewUploadRegistry(t, &sd_config.UploadConfig{
 				DefaultUpstream: sd_route.DropUpstream,
 			}, false)
-			manager := registry.newManager()
+			manager := mustNewUploadManager(t, registry)
 			convey.So(manager, convey.ShouldNotBeNil)
 			convey.So(manager.router == registry.router, convey.ShouldBeFalse)
 		})
@@ -392,10 +435,11 @@ func TestUpstreamRegistryNewManagerConvey(t *testing.T) {
 	convey.Convey("Test upstreamRegistry.newManager", t, func() {
 		convey.Convey("builds named upstreams", func() {
 			stub := &stubUpstream{}
-			patches := gomonkey.ApplyFuncReturn(sd_upstream.NewUpstream, stub)
+			patches := gomonkey.ApplyFuncReturn(sd_upstream.NewUpstream, stub, nil)
 			defer patches.Reset()
 			registry := &upstreamRegistry{definitions: []upstreamDefinition{{name: "default"}}}
-			manager := registry.newManager()
+			manager, err := registry.newManager()
+			convey.So(err, convey.ShouldBeNil)
 			_, ok := manager.SelectPeer("default", nil)
 			convey.So(ok, convey.ShouldBeTrue)
 		})
@@ -406,10 +450,12 @@ func TestUpstreamDefinitionNewUpstreamConvey(t *testing.T) {
 	convey.Convey("Test upstreamDefinition.newUpstream", t, func() {
 		convey.Convey("delegates configuration", func() {
 			stub := &stubUpstream{}
-			patches := gomonkey.ApplyFuncReturn(sd_upstream.NewUpstream, stub)
+			patches := gomonkey.ApplyFuncReturn(sd_upstream.NewUpstream, stub, nil)
 			defer patches.Reset()
 			definition := &upstreamDefinition{name: "default", upstreamType: sd_upstream.UpstreamTypeRR}
-			convey.So(definition.newUpstream(), convey.ShouldEqual, stub)
+			upstream, err := definition.newUpstream()
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(upstream, convey.ShouldEqual, stub)
 		})
 	})
 }
@@ -417,7 +463,7 @@ func TestUpstreamDefinitionNewUpstreamConvey(t *testing.T) {
 func TestUploadManagerRouteUpstreamConvey(t *testing.T) {
 	convey.Convey("Test uploadManager.routeUpstream", t, func() {
 		convey.Convey("delegates to router", func() {
-			manager := newTestUploadManager(nil, sd_route.NewRouter("default", nil, false))
+			manager := newTestUploadManager(nil, mustNewRouter(t, "default", nil, false))
 			convey.So(manager.routeUpstream(nil), convey.ShouldEqual, "default")
 		})
 	})
@@ -429,7 +475,7 @@ func TestUploadManagerSelectPeerConvey(t *testing.T) {
 			peer := &sd_upstream.Peer{}
 			manager := newTestUploadManager(
 				map[string]sd_upstream.Upstream{"default": &stubUpstream{peer: peer}},
-				sd_route.NewRouter("default", nil, false),
+				mustNewRouter(t, "default", nil, false),
 			)
 			got, ok := manager.selectPeer("default", nil)
 			convey.So(ok, convey.ShouldBeTrue)
@@ -445,7 +491,7 @@ func TestUploadManagerMarkPeerDeadConvey(t *testing.T) {
 			stub := &stubUpstream{}
 			manager := newTestUploadManager(
 				map[string]sd_upstream.Upstream{"default": stub},
-				sd_route.NewRouter("default", nil, false),
+				mustNewRouter(t, "default", nil, false),
 			)
 			manager.markPeerDead("default", peer)
 			convey.So(stub.deadPeer, convey.ShouldEqual, peer)
@@ -458,7 +504,7 @@ func TestUploadManagerStatsConvey(t *testing.T) {
 		convey.Convey("combines route and upstream stats", func() {
 			manager := newTestUploadManager(
 				map[string]sd_upstream.Upstream{"default": &stubUpstream{}},
-				sd_route.NewRouter("default", nil, true),
+				mustNewRouter(t, "default", nil, true),
 			)
 			stats := manager.stats()
 			convey.So(stats.route.Routes, convey.ShouldBeEmpty)

@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInitLogger(t *testing.T) {
@@ -39,6 +40,28 @@ func TestInitLogger(t *testing.T) {
 			assert.Nil(t, err)
 		}
 	}
+}
+
+func TestInitLoggerResolvesRelativePath(t *testing.T) {
+	logDir, err := os.MkdirTemp(".", "relative-log-")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, os.RemoveAll(logDir))
+	})
+
+	logPath := filepath.Join(".", filepath.Base(logDir), "stevedore.log")
+	err = InitLogger(&sd_config.LogConfig{
+		Path:             logPath,
+		Level:            "debug",
+		MaxAgeHour:       1,
+		RotationTimeHour: 1,
+	})
+	require.NoError(t, err)
+
+	logrus.Debug("test relative log path")
+	content, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Contains(t, string(content), "test relative log path")
 }
 
 func TestInitLoggerConvey(t *testing.T) {

@@ -2,17 +2,23 @@ package sd_diagnosis
 
 import (
 	"fmt"
+	"path/filepath"
+	"time"
+
 	"github.com/lestrrat/go-file-rotatelogs"
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/sirupsen/logrus"
-	"time"
 )
 
 func InitLogger(conf *sd_config.LogConfig) error {
-	// parse conf
+	logPath, err := filepath.Abs(conf.Path)
+	if err != nil {
+		return fmt.Errorf("resolve log path failed: %w", err)
+	}
+
 	writer, err := rotatelogs.New(
-		conf.Path+".%Y%m%d",
-		rotatelogs.WithLinkName(conf.Path),
+		logPath+".%Y%m%d",
+		rotatelogs.WithLinkName(logPath),
 		rotatelogs.WithMaxAge(time.Hour*time.Duration(conf.MaxAgeHour)),
 		rotatelogs.WithRotationTime(time.Hour*time.Duration(conf.RotationTimeHour)))
 	if err != nil {
@@ -29,7 +35,7 @@ func InitLogger(conf *sd_config.LogConfig) error {
 	logrus.SetLevel(level)
 	logrus.SetReportCaller(conf.Verbose)
 	logrus.SetFormatter(&logrus.TextFormatter{
-		ForceQuote:                true,
+		ForceQuote: true,
 	})
 
 	return nil

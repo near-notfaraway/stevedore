@@ -31,10 +31,10 @@ type Peer struct {
 	state    int32         // atomic peerState
 }
 
-func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
+func NewPeer(id int, addr string, config *sd_config.PeerConfig) (*Peer, error) {
 	sockaddr := sd_socket.ResolveUDPSockaddr(addr)
 	if sockaddr == nil {
-		panic(fmt.Errorf("resolve peer addr %s failed", addr))
+		return nil, fmt.Errorf("resolve peer addr %s failed", addr)
 	}
 
 	family := unix.AF_INET
@@ -49,7 +49,7 @@ func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
 		family:   family,
 		weight:   config.Weight,
 		state:    int32(peerAlive),
-	}
+	}, nil
 }
 
 func (p *Peer) Send(fd int, data []byte) error {

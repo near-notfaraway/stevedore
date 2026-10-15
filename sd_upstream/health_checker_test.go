@@ -1,26 +1,30 @@
 package sd_upstream
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
 func TestNewHealthChecker(t *testing.T) {
-	peer := NewPeer(0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1})
-	checker := newHealthChecker(&sd_config.HealthCheckerConfig{
+	peer := mustNewPeer(t, 0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1})
+	checker, err := newHealthChecker(&sd_config.HealthCheckerConfig{
 		HeartbeatIntervalSec: 2,
 		HeartbeatTimeoutSec:  3,
 		SuccessTimes:         4,
 		FailedTimes:          5,
 	}, []*Peer{peer})
+	require.NoError(t, err)
 	defer closeHealthCheckerFDs(checker)
 
 	require.Equal(t, 2*time.Second, checker.heartbeatInterval)
@@ -32,12 +36,52 @@ func TestNewHealthChecker(t *testing.T) {
 	require.Len(t, checker.failedCounter, 1)
 }
 
+func TestNewHealthCheckerClosesFDsOnPartialFailure(t *testing.T) {
+	socketCalls := 0
+	var closedFDs []int
+	patches := gomonkey.NewPatches()
+	patches.ApplyFunc(
+		sd_socket.UDPSocket,
+		func(int, bool, bool, bool) (int, error) {
+			socketCalls++
+			if socketCalls == 1 {
+				return 123, nil
+			}
+			return -1, errors.New("socket failed")
+		},
+	)
+	patches.ApplyFunc(unix.Close, func(fd int) error {
+		closedFDs = append(closedFDs, fd)
+		return nil
+	})
+	defer patches.Reset()
+
+	checker, err := newHealthChecker(&sd_config.HealthCheckerConfig{
+		HeartbeatIntervalSec: 1,
+		SuccessTimes:         1,
+		FailedTimes:          1,
+	}, []*Peer{
+		{id: 0, family: unix.AF_INET, sockaddr: &unix.SockaddrInet4{}},
+		{id: 1, family: unix.AF_INET6, sockaddr: &unix.SockaddrInet6{}},
+	})
+
+	require.Nil(t, checker)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "socket failed")
+	require.Equal(t, []int{123}, closedFDs)
+}
+
 func TestNewHealthCheckerUsesPeerAddressFamilies(t *testing.T) {
 	peers := []*Peer{
-		NewPeer(0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1}),
-		NewPeer(1, "[::1]:2345", &sd_config.PeerConfig{Weight: 1}),
+		mustNewPeer(t, 0, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 1}),
+		mustNewPeer(t, 1, "[::1]:2345", &sd_config.PeerConfig{Weight: 1}),
 	}
-	checker := newHealthChecker(&sd_config.HealthCheckerConfig{}, peers)
+	checker, err := newHealthChecker(&sd_config.HealthCheckerConfig{
+		HeartbeatIntervalSec: 1,
+		SuccessTimes:         1,
+		FailedTimes:          1,
+	}, peers)
+	require.NoError(t, err)
 	defer closeHealthCheckerFDs(checker)
 
 	ipv4Addr, err := unix.Getsockname(checker.checkFds[0])
@@ -50,11 +94,13 @@ func TestNewHealthCheckerUsesPeerAddressFamilies(t *testing.T) {
 }
 
 func TestHealthCheckerCheckRejectsNonPositiveInterval(t *testing.T) {
-	checker := &healthChecker{}
+	checker, err := newHealthChecker(&sd_config.HealthCheckerConfig{
+		SuccessTimes: 1,
+		FailedTimes:  1,
+	}, nil)
 
-	require.Panics(t, func() {
-		checker.check(make(chan struct{}, 1))
-	})
+	require.Nil(t, checker)
+	require.EqualError(t, err, "heartbeat interval must be positive")
 }
 
 func TestHealthCheckerHandleFailedCheck(t *testing.T) {
@@ -117,13 +163,15 @@ func TestHealthCheckerCheckOnePeerHandlesSuccess(t *testing.T) {
 	require.NoError(t, err)
 	defer receiver.Close()
 
-	peer := NewPeer(0, receiver.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
+	peer := mustNewPeer(t, 0, receiver.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
 	peer.setState(peerDead)
-	checker := newHealthChecker(&sd_config.HealthCheckerConfig{
-		HeartbeatTimeoutSec: 0,
-		SuccessTimes:        1,
-		FailedTimes:         1,
+	checker, err := newHealthChecker(&sd_config.HealthCheckerConfig{
+		HeartbeatIntervalSec: 1,
+		HeartbeatTimeoutSec:  0,
+		SuccessTimes:         1,
+		FailedTimes:          1,
 	}, []*Peer{peer})
+	require.NoError(t, err)
 	defer closeHealthCheckerFDs(checker)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -161,10 +209,13 @@ func closeHealthCheckerFDs(checker *healthChecker) {
 func TestNewHealthCheckerConvey(t *testing.T) {
 	convey.Convey("Test newHealthChecker", t, func() {
 		convey.Convey("initializes counters without peers", func() {
-			checker := newHealthChecker(&sd_config.HealthCheckerConfig{
+			checker, err := newHealthChecker(&sd_config.HealthCheckerConfig{
 				HeartbeatIntervalSec: 2,
 				HeartbeatTimeoutSec:  3,
+				SuccessTimes:         1,
+				FailedTimes:          1,
 			}, nil)
+			convey.So(err, convey.ShouldBeNil)
 			convey.So(checker.heartbeatInterval, convey.ShouldEqual, 2*time.Second)
 			convey.So(checker.checkFds, convey.ShouldBeEmpty)
 		})

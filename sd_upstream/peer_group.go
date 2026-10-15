@@ -20,25 +20,46 @@ type PeerGroup struct {
 	updateMu      sync.Mutex     // serializes immutable snapshot publication
 	version       uint64         // monotonically increasing snapshot version
 	snapshotValue atomic.Value   // stores *peerSnapshot
+	publisherWG   sync.WaitGroup
 }
 
-func NewPeerGroup(config *sd_config.UpstreamConfig) *PeerGroup {
-	peers, backup := initUpstreamPeers(config)
+// NewPeerGroup builds shared peer state and starts its health update loops.
+func NewPeerGroup(config *sd_config.UpstreamConfig) (*PeerGroup, error) {
+	peers, backup, err := initUpstreamPeers(config)
+	if err != nil {
+		return nil, err
+	}
+	checker, err := newHealthChecker(config.HealthChecker, peers)
+	if err != nil {
+		return nil, err
+	}
 	group := &PeerGroup{
 		peers:         peers,
 		backup:        backup,
-		healthChecker: newHealthChecker(config.HealthChecker, peers),
+		healthChecker: checker,
 	}
 	group.refresh()
 
 	changedCh := make(chan struct{}, 1)
-	go group.healthChecker.check(changedCh)
+	group.healthChecker.start(changedCh)
+	group.publisherWG.Add(1)
 	go func() {
-		for range changedCh {
-			group.refresh()
+		defer group.publisherWG.Done()
+		for {
+			select {
+			case <-changedCh:
+				group.refresh()
+			case <-group.healthChecker.stopCh:
+				return
+			}
 		}
 	}()
-	return group
+	return group, nil
+}
+
+func (g *PeerGroup) Close() {
+	g.healthChecker.close()
+	g.publisherWG.Wait()
 }
 
 func (g *PeerGroup) snapshot() *peerSnapshot {
@@ -50,6 +71,7 @@ func (g *PeerGroup) markDead(peer *Peer) {
 	g.refresh()
 }
 
+// refresh publishes a new immutable snapshot of currently selectable peers.
 func (g *PeerGroup) refresh() {
 	g.updateMu.Lock()
 	defer g.updateMu.Unlock()

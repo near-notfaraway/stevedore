@@ -4,15 +4,26 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_util"
 	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
 )
 
+func mustNewRouter(
+	t testing.TB,
+	defaultUpstream string,
+	configs []sd_config.RouteConfig,
+	statsEnabled bool,
+) *Router {
+	t.Helper()
+	router, err := NewRouter(defaultUpstream, configs, statsEnabled)
+	require.NoError(t, err)
+	return router
+}
+
 func TestRouterStatsCountNamedRouteMatches(t *testing.T) {
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Name: "canary",
 			Conditions: []sd_config.RouteConditionConfig{
@@ -31,7 +42,7 @@ func TestRouterStatsCountNamedRouteMatches(t *testing.T) {
 }
 
 func TestRouterStatsDisabledByDefault(t *testing.T) {
-	router := NewRouter(DropUpstream, nil, false)
+	router := mustNewRouter(t, DropUpstream, nil, false)
 
 	router.Route(nil)
 
@@ -42,7 +53,7 @@ func TestRouterStatsDisabledByDefault(t *testing.T) {
 }
 
 func TestRouterStatsGenerateNameForLegacyRoute(t *testing.T) {
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{
 				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
@@ -55,7 +66,7 @@ func TestRouterStatsGenerateNameForLegacyRoute(t *testing.T) {
 }
 
 func TestRouterCloneSharesRulesAndKeepsIndependentStats(t *testing.T) {
-	template := NewRouter("default", []sd_config.RouteConfig{
+	template := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Name: "canary",
 			Conditions: []sd_config.RouteConditionConfig{
@@ -81,7 +92,7 @@ func TestRouterCloneSharesRulesAndKeepsIndependentStats(t *testing.T) {
 }
 
 func TestRouterCloneKeepsStatsDisabled(t *testing.T) {
-	template := NewRouter("default", []sd_config.RouteConfig{
+	template := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{
 				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
@@ -100,7 +111,7 @@ func TestRouterCloneKeepsStatsDisabled(t *testing.T) {
 func TestRouterStatsConcurrentWithRouting(t *testing.T) {
 	const matches = 1000
 
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{
 				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
@@ -128,24 +139,25 @@ func TestRouterStatsConcurrentWithRouting(t *testing.T) {
 }
 
 func TestNewRouterRejectsDuplicateRouteNames(t *testing.T) {
-	require.Panics(t, func() {
-		NewRouter("default", []sd_config.RouteConfig{
-			{
-				Name:       "duplicate",
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-				Upstream:   "first",
-			},
-			{
-				Name:       "duplicate",
-				Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x02"}},
-				Upstream:   "second",
-			},
-		}, false)
-	})
+	router, err := NewRouter("default", []sd_config.RouteConfig{
+		{
+			Name:       "duplicate",
+			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
+			Upstream:   "first",
+		},
+		{
+			Name:       "duplicate",
+			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x02"}},
+			Upstream:   "second",
+		},
+	}, false)
+
+	require.Nil(t, router)
+	require.EqualError(t, err, `route name "duplicate" is duplicated`)
 }
 
 func TestRouterStatsCountDefaultRoutesAndShortPayloads(t *testing.T) {
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{
 				{KeyBytes: "1:2", Operator: "==", Value: "0x01"},
@@ -164,7 +176,7 @@ func TestRouterStatsCountDefaultRoutesAndShortPayloads(t *testing.T) {
 
 func TestRouterStatsCountExplicitDrops(t *testing.T) {
 	for _, target := range []string{"", DropUpstream} {
-		router := NewRouter(target, []sd_config.RouteConfig{
+		router := mustNewRouter(t, target, []sd_config.RouteConfig{
 			{
 				Name: "blocked",
 				Conditions: []sd_config.RouteConditionConfig{
@@ -185,7 +197,7 @@ func TestRouterStatsCountExplicitDrops(t *testing.T) {
 }
 
 func TestRouterUsesFirstMatchingRoute(t *testing.T) {
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
 			Upstream:   "first",
@@ -200,7 +212,7 @@ func TestRouterUsesFirstMatchingRoute(t *testing.T) {
 }
 
 func TestRouterUsesDefaultWithoutMatch(t *testing.T) {
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
 			Upstream:   "target",
@@ -214,7 +226,7 @@ func TestRouterUsesDefaultWithoutMatch(t *testing.T) {
 func TestRouterRequiresAllConditionsToMatch(t *testing.T) {
 	var router *Router
 	require.NotPanics(t, func() {
-		router = NewRouter("default", []sd_config.RouteConfig{
+		router = mustNewRouter(t, "default", []sd_config.RouteConfig{
 			{
 				Conditions: []sd_config.RouteConditionConfig{
 					{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
@@ -231,13 +243,14 @@ func TestRouterRequiresAllConditionsToMatch(t *testing.T) {
 }
 
 func TestNewRouterRejectsRouteWithoutConditions(t *testing.T) {
-	require.Panics(t, func() {
-		NewRouter("default", []sd_config.RouteConfig{
-			{
-				Upstream: "target",
-			},
-		}, false)
-	})
+	router, err := NewRouter("default", []sd_config.RouteConfig{
+		{
+			Upstream: "target",
+		},
+	}, false)
+
+	require.Nil(t, router)
+	require.EqualError(t, err, "conditions are required in route 0")
 }
 
 func TestNewRouterConvey(t *testing.T) {
@@ -252,7 +265,7 @@ func TestNewRouterConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("builds routes and normalizes the drop target", func() {
-			router := NewRouter(DropUpstream, []sd_config.RouteConfig{config}, false)
+			router := mustNewRouter(t, DropUpstream, []sd_config.RouteConfig{config}, false)
 			convey.So(router.defaultUpstream, convey.ShouldBeEmpty)
 			convey.So(router.routes, convey.ShouldHaveLength, 1)
 		})
@@ -271,7 +284,7 @@ func TestRouterCloneConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("shares immutable routes and isolates stats", func() {
-			router := NewRouter("default", []sd_config.RouteConfig{config}, true)
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{config}, true)
 			clone := router.Clone()
 			convey.So(clone.routes[0], convey.ShouldEqual, router.routes[0])
 			clone.Route([]byte{1})
@@ -293,7 +306,7 @@ func TestRouterStatsConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("snapshots atomic counters", func() {
-			router := NewRouter("default", []sd_config.RouteConfig{config}, true)
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{config}, true)
 			router.stats.routeMatches[0].Add(2)
 			stats := router.Stats()
 			convey.So(stats.Routes[0].Name, convey.ShouldEqual, "matched")
@@ -314,7 +327,7 @@ func TestRouterRouteConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("uses the no-stats route path", func() {
-			router := NewRouter("default", []sd_config.RouteConfig{config}, false)
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{config}, false)
 			convey.So(router.Route([]byte{1}), convey.ShouldEqual, "target")
 			convey.So(router.Route([]byte{2}), convey.ShouldEqual, "default")
 		})
@@ -333,7 +346,7 @@ func TestRouterRouteWithStatsConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("records fallback metadata", func() {
-			router := NewRouter("", []sd_config.RouteConfig{config}, true)
+			router := mustNewRouter(t, "", []sd_config.RouteConfig{config}, true)
 			convey.So(router.routeWithStats(nil), convey.ShouldBeEmpty)
 			stats := router.Stats()
 			convey.So(stats.DefaultRoutes, convey.ShouldEqual, 1)
@@ -366,18 +379,11 @@ func TestNewRouteConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("delegates condition construction", func() {
-			patches := gomonkey.ApplyFuncReturn(newCondition, condition{
-				operator:   sd_util.BytesOpEqual,
-				bytesStart: 0,
-				bytesEnd:   1,
-				bytesValue: []byte{1},
-			})
-			defer patches.Reset()
-
-			got := newRoute(3, sd_config.RouteConfig{
+			got, err := newRoute(3, sd_config.RouteConfig{
 				Conditions: config.Conditions,
 				Upstream:   DropUpstream,
 			})
+			convey.So(err, convey.ShouldBeNil)
 			convey.So(got.name, convey.ShouldEqual, "route-3")
 			convey.So(got.upstream, convey.ShouldBeEmpty)
 			convey.So(got.conditions, convey.ShouldHaveLength, 1)

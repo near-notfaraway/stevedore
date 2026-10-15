@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
@@ -16,7 +17,20 @@ import (
 const (
 	reactorPollTimeoutMs    = 1000
 	defaultRecvBatchesPerFD = 8
+	reactorCommandQueueSize = 1
 )
+
+const (
+	reactorCommandPending uint32 = iota
+	reactorCommandApplied
+	reactorCommandCanceled
+)
+
+type reactorCommand struct {
+	uploadManager *uploadManager
+	done          chan struct{}
+	state         atomic.Uint32
+}
 
 type reactor struct {
 	id             int                                           // unique reactor id
@@ -34,8 +48,10 @@ type reactor struct {
 	recvBatchLimit int                                           // maximum recvmmsg calls per fd per round
 	clockStart     time.Time                                     // monotonic origin for session expiration
 	logger         *logrus.Entry                                 // reactor-scoped logger
+	commandCh      chan *reactorCommand                          // control commands applied by this reactor
 }
 
+// newReactor creates one isolated network shard and all resources it owns.
 func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *uploadManager) (*reactor, error) {
 	eventSize := config.Server.EventSize
 	if eventSize < 1 {
@@ -82,6 +98,7 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 		recvBatchLimit: recvBatchLimit,
 		clockStart:     clockStart,
 		logger:         logrus.WithField("reactor_id", id),
+		commandCh:      make(chan *reactorCommand, reactorCommandQueueSize),
 	}, nil
 }
 
@@ -90,6 +107,7 @@ func (r *reactor) serve(ctx context.Context) error {
 	defer r.close()
 
 	return r.selector.Polling(ctx, reactorPollTimeoutMs, func(evs []sd_socket.PolledEvent) {
+		r.processCommands()
 		for i := range evs {
 			if evs[i].Events&sd_socket.SelectorEventRead == 0 {
 				continue
@@ -99,6 +117,56 @@ func (r *reactor) serve(ctx context.Context) error {
 		r.processReady()
 		r.expireSessions(r.nowSec())
 	})
+}
+
+// updateUploadManager queues a manager replacement and waits for reactor acknowledgment.
+func (r *reactor) updateUploadManager(ctx context.Context, manager *uploadManager) error {
+	if manager == nil {
+		return fmt.Errorf("upload manager is required")
+	}
+
+	command := &reactorCommand{
+		uploadManager: manager,
+		done:          make(chan struct{}),
+	}
+	select {
+	case r.commandCh <- command:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if err := r.selector.Wake(); err != nil {
+		if !command.state.CompareAndSwap(reactorCommandPending, reactorCommandCanceled) {
+			<-command.done
+			return nil
+		}
+		return fmt.Errorf("wake reactor selector: %w", err)
+	}
+
+	select {
+	case <-command.done:
+		return nil
+	case <-ctx.Done():
+		if command.state.CompareAndSwap(reactorCommandPending, reactorCommandCanceled) {
+			return ctx.Err()
+		}
+		<-command.done
+		return nil
+	}
+}
+
+func (r *reactor) processCommands() {
+	for {
+		select {
+		case command := <-r.commandCh:
+			if command.state.CompareAndSwap(reactorCommandPending, reactorCommandApplied) {
+				r.upstreamMgr = command.uploadManager
+			}
+			close(command.done)
+		default:
+			return
+		}
+	}
 }
 
 func (r *reactor) nowSec() int64 {
@@ -118,6 +186,7 @@ func (r *reactor) enqueueReady(fd int) {
 	r.readyFDs = append(r.readyFDs, fd)
 }
 
+// processReady drains the fair-ready queue and reschedules descriptors needing retries.
 func (r *reactor) processReady() {
 	current := r.readyFDs
 	r.readyFDs = current[:0]
@@ -162,6 +231,7 @@ func (r *reactor) handleUpload() bool {
 	return true
 }
 
+// handleUploadPacket routes one downstream packet and retries eligible upstream peers.
 func (r *reactor) handleUploadPacket(index int, now int64) {
 	nr := r.rxMC.GetLengthOfMsg(index)
 	buf := r.rxMC.GetBufOfMsg(index)[:nr]
@@ -237,6 +307,7 @@ func (r *reactor) getOrCreateSessionFD(sess *sd_session.Session, family int) (in
 	return fd, nil
 }
 
+// handleDownload batches upstream responses and forwards them to the downstream session.
 func (r *reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 	for batch := 0; batch < r.recvBatchLimit; batch++ {
 		nPkt, errno := sd_socket.RecvMMsg(fd, r.rxMC)

@@ -6,7 +6,6 @@ import (
 	"strconv"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -25,42 +24,114 @@ type Upstream interface {
 	MarkPeerDead(peer *Peer)
 }
 
-func NewUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) Upstream {
+// ValidateConfig checks one upstream definition without creating runtime resources.
+func ValidateConfig(config *sd_config.UpstreamConfig) error {
+	peers, _, err := initUpstreamPeers(config)
+	if err != nil {
+		return err
+	}
+	if err := validateHealthCheckerConfig(config.HealthChecker); err != nil {
+		return err
+	}
+
 	switch config.Type {
 	case UpstreamTypeRR:
-		return newRRUpstream(group)
+		return nil
 	case UpstreamTypeCHash:
-		return newCHashUpstream(config, group)
+		if _, err := newKeyExtractor(config); err != nil {
+			return fmt.Errorf("payload key is invalid in upstream %s: %w", config.Name, err)
+		}
+		switch config.InvalidKeyPolicy {
+		case "", invalidKeyPolicyDrop:
+			return nil
+		case invalidKeyPolicyRR:
+			return validateRRListSize(peers)
+		default:
+			return fmt.Errorf("invalid key policy %s in upstream %s", config.InvalidKeyPolicy, config.Name)
+		}
 	default:
-		panic(fmt.Errorf("invalid upstream type: %s", config.Type))
+		return fmt.Errorf("invalid upstream type: %s", config.Type)
 	}
 }
 
-func initUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup *Peer) {
+func NewUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) (Upstream, error) {
+	if config == nil {
+		return nil, fmt.Errorf("upstream config is required")
+	}
+	switch config.Type {
+	case UpstreamTypeRR:
+		return newRRUpstream(group), nil
+	case UpstreamTypeCHash:
+		return newCHashUpstream(config, group)
+	default:
+		return nil, fmt.Errorf("invalid upstream type: %s", config.Type)
+	}
+}
+
+// initUpstreamPeers validates peer definitions and builds primary and backup peers.
+func initUpstreamPeers(config *sd_config.UpstreamConfig) (peers []*Peer, backup *Peer, err error) {
+	if config == nil {
+		return nil, nil, fmt.Errorf("upstream config is required")
+	}
 	peers = make([]*Peer, 0, len(config.Peers))
 	uniqueMap := make(map[string]struct{})
 
 	for id, peerConfig := range config.Peers {
+		if peerConfig == nil {
+			return nil, nil, fmt.Errorf("peer config is required in upstream %s", config.Name)
+		}
 		peerAddr := net.JoinHostPort(peerConfig.IP, strconv.Itoa(peerConfig.Port))
 		if peerConfig.Weight < 1 {
-			logrus.Panicf("peer %s has invalid weight %d in upstream %s",
-				peerAddr, peerConfig.Weight, config.Name)
+			return nil, nil, fmt.Errorf(
+				"peer %s has invalid weight %d in upstream %s",
+				peerAddr,
+				peerConfig.Weight,
+				config.Name,
+			)
 		}
 		if _, dup := uniqueMap[peerAddr]; dup {
-			logrus.Panicf("duplicated peer %s in upstream %s", peerAddr, config.Name)
+			return nil, nil, fmt.Errorf("duplicated peer %s in upstream %s", peerAddr, config.Name)
 		}
 		uniqueMap[peerAddr] = struct{}{}
 
-		peer := NewPeer(id, peerAddr, peerConfig)
+		peer, err := NewPeer(id, peerAddr, peerConfig)
+		if err != nil {
+			return nil, nil, err
+		}
 		peers = append(peers, peer)
 		if peerConfig.Backup {
 			if backup != nil {
-				logrus.Panicf("two peer %s and %s is backup", backup.addr, peer.addr)
+				return nil, nil, fmt.Errorf("two peer %s and %s is backup", backup.addr, peer.addr)
 			}
 			backup = peer
 		}
 	}
-	return
+	if config.Type == UpstreamTypeRR {
+		if err := validateRRListSize(peers); err != nil {
+			return nil, nil, err
+		}
+	}
+	return peers, backup, nil
+}
+
+func validateRRListSize(peers []*Peer) error {
+	weightDivisor := 0
+	for _, peer := range peers {
+		weightDivisor = greatestCommonDivisor(weightDivisor, peer.weight)
+	}
+	if weightDivisor == 0 {
+		return nil
+	}
+
+	totalWeight := 0
+	for _, peer := range peers {
+		weight := peer.weight / weightDivisor
+		if weight > maxRRListSize-totalWeight {
+			return fmt.Errorf("normalized rr weight sum exceeds %d", maxRRListSize)
+		}
+		totalWeight += weight
+	}
+	return nil
 }
 
 type rrUpstream struct {
@@ -104,6 +175,7 @@ func (u *rrUpstream) syncSnapshot() {
 	u.snapshotVersion = snapshot.version
 }
 
+// buildRRList expands normalized peer weights into a smooth round-robin cycle.
 func buildRRList(peers []*Peer) []*Peer {
 	weightDivisor := 0
 	for _, peer := range peers {
@@ -162,10 +234,11 @@ type cHashUpstream struct {
 	fallback        *rrUpstream     // optional fallback for invalid payload keys
 }
 
-func newCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *cHashUpstream {
+// newCHashUpstream validates key extraction settings and builds a hash selector.
+func newCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) (*cHashUpstream, error) {
 	key, err := newKeyExtractor(config)
 	if err != nil {
-		logrus.Panicf("payload key is invalid in upstream %s: %v", config.Name, err)
+		return nil, fmt.Errorf("payload key is invalid in upstream %s: %w", config.Name, err)
 	}
 
 	policy := config.InvalidKeyPolicy
@@ -178,7 +251,7 @@ func newCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *cHash
 	case invalidKeyPolicyRR:
 		fallback = newRRUpstream(group)
 	default:
-		logrus.Panicf("invalid key policy %s in upstream %s", policy, config.Name)
+		return nil, fmt.Errorf("invalid key policy %s in upstream %s", policy, config.Name)
 	}
 
 	ups := &cHashUpstream{
@@ -188,7 +261,7 @@ func newCHashUpstream(config *sd_config.UpstreamConfig, group *PeerGroup) *cHash
 		fallback: fallback,
 	}
 	ups.syncSnapshot()
-	return ups
+	return ups, nil
 }
 
 func (u *cHashUpstream) SelectPeer(data []byte) *Peer {

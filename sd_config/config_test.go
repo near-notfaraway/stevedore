@@ -2,10 +2,100 @@ package sd_config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadReturnsIndependentConfigs(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "stevedore.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"Common": {
+			"WorkingDir": "/first",
+			"PidPath": "/first/stevedore.pid"
+		}
+	}`), 0o600))
+
+	first, err := Load(configPath)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"Common": {
+			"WorkingDir": "/second",
+			"PidPath": "/second/stevedore.pid"
+		}
+	}`), 0o600))
+	second, err := Load(configPath)
+	require.NoError(t, err)
+
+	require.NotSame(t, first, second)
+	require.Equal(t, "/first", first.Common.WorkingDir)
+	require.Equal(t, "/second", second.Common.WorkingDir)
+}
+
+func TestLoadRejectsMissingCommonConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "stevedore.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{}`), 0o600))
+
+	config, err := Load(configPath)
+
+	require.Nil(t, config)
+	require.EqualError(t, err, "common config is required")
+}
+
+func TestLoadReturnsUnmarshalError(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "stevedore.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{`), 0o600))
+
+	config, err := Load(configPath)
+
+	require.Nil(t, config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "load config")
+}
+
+func TestValidateUploadReloadAllowsUploadChanges(t *testing.T) {
+	current := testReloadConfig()
+	next := testReloadConfig()
+	next.Upload = &UploadConfig{DefaultUpstream: "reloaded"}
+
+	require.NoError(t, ValidateUploadReload(current, next))
+}
+
+func TestValidateUploadReloadRejectsNonUploadChanges(t *testing.T) {
+	tests := map[string]func(*Config){
+		"Common":  func(config *Config) { config.Common.WorkingDir = "/changed" },
+		"PProf":   func(config *Config) { config.PProf.Open = true },
+		"Log":     func(config *Config) { config.Log.Level = "debug" },
+		"Server":  func(config *Config) { config.Server.BatchSize++ },
+		"Session": func(config *Config) { config.Session.TimeoutSec++ },
+	}
+
+	for section, change := range tests {
+		t.Run(section, func(t *testing.T) {
+			current := testReloadConfig()
+			next := testReloadConfig()
+			change(next)
+
+			err := ValidateUploadReload(current, next)
+
+			require.EqualError(t, err, "non-Upload config changed: "+section)
+		})
+	}
+}
+
+func testReloadConfig() *Config {
+	return &Config{
+		Common:  &CommonConfig{WorkingDir: "/work", PidPath: "/run/stevedore.pid"},
+		PProf:   &PProfConfig{ServerAddr: ":6060"},
+		Log:     &LogConfig{Level: "info"},
+		Server:  &ServerConfig{ListenAddr: ":2614", BatchSize: 32},
+		Upload:  &UploadConfig{DefaultUpstream: "default"},
+		Session: &SessionConfig{TimeoutSec: 30},
+	}
+}
 
 func TestRouteConfigUsesUpstreamAsOnlyRoutingTarget(t *testing.T) {
 	raw := []byte(`{

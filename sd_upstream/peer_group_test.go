@@ -6,6 +6,7 @@ import (
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestPeerGroupRefreshIncludesHealthyBackup(t *testing.T) {
@@ -50,14 +51,60 @@ func TestPeerGroupRefreshPublishesEmptySnapshotWithoutBackup(t *testing.T) {
 func TestNewPeerGroupConvey(t *testing.T) {
 	convey.Convey("Test NewPeerGroup", t, func() {
 		convey.Convey("initializes and publishes a snapshot", func() {
-			group := NewPeerGroup(&sd_config.UpstreamConfig{
-				HealthChecker: &sd_config.HealthCheckerConfig{HeartbeatIntervalSec: 3600},
+			group, err := NewPeerGroup(&sd_config.UpstreamConfig{
+				HealthChecker: &sd_config.HealthCheckerConfig{
+					HeartbeatIntervalSec: 3600,
+					SuccessTimes:         1,
+					FailedTimes:          1,
+				},
 			})
+			convey.So(err, convey.ShouldBeNil)
 			convey.So(group, convey.ShouldNotBeNil)
 			convey.So(group.snapshot(), convey.ShouldNotBeNil)
 			convey.So(group.snapshot().peers, convey.ShouldBeEmpty)
 		})
 	})
+}
+
+func TestNewPeerGroupRejectsInvalidPeer(t *testing.T) {
+	group, err := NewPeerGroup(&sd_config.UpstreamConfig{
+		Name: "invalid",
+		Type: UpstreamTypeRR,
+		Peers: []*sd_config.PeerConfig{
+			{IP: "127.0.0.1", Port: 2345, Weight: 0},
+		},
+		HealthChecker: &sd_config.HealthCheckerConfig{
+			HeartbeatIntervalSec: 1,
+			SuccessTimes:         1,
+			FailedTimes:          1,
+		},
+	})
+
+	require.Nil(t, group)
+	require.Error(t, err)
+}
+
+func TestPeerGroupCloseClosesHealthCheckerFDs(t *testing.T) {
+	group, err := NewPeerGroup(&sd_config.UpstreamConfig{
+		Name: "closable",
+		Type: UpstreamTypeRR,
+		Peers: []*sd_config.PeerConfig{
+			{IP: "127.0.0.1", Port: 2345, Weight: 1},
+		},
+		HealthChecker: &sd_config.HealthCheckerConfig{
+			HeartbeatIntervalSec: 3600,
+			SuccessTimes:         1,
+			FailedTimes:          1,
+		},
+	})
+	require.NoError(t, err)
+	fd := group.healthChecker.checkFds[0]
+
+	group.Close()
+	group.Close()
+
+	_, err = unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	require.Error(t, err)
 }
 
 func TestPeerGroupSnapshotConvey(t *testing.T) {

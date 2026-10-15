@@ -1,11 +1,11 @@
 package sd_route
 
 import (
+	"fmt"
 	"strconv"
 	"sync/atomic"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/sirupsen/logrus"
 )
 
 const DropUpstream = "drop"
@@ -16,13 +16,17 @@ type Router struct {
 	stats           *routerStats
 }
 
-func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig, statsEnabled bool) *Router {
+// NewRouter validates route definitions and builds an immutable routing table.
+func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig, statsEnabled bool) (*Router, error) {
 	routes := make([]*route, 0, len(configs))
 	names := make(map[string]struct{}, len(configs))
 	for id, config := range configs {
-		route := newRoute(id, config)
+		route, err := newRoute(id, config)
+		if err != nil {
+			return nil, err
+		}
 		if _, ok := names[route.name]; ok {
-			logrus.Panicf("route name %s is duplicated", route.name)
+			return nil, fmt.Errorf("route name %q is duplicated", route.name)
 		}
 		names[route.name] = struct{}{}
 		routes = append(routes, route)
@@ -34,7 +38,7 @@ func NewRouter(defaultUpstream string, configs []sd_config.RouteConfig, statsEna
 		defaultUpstream: defaultUpstream,
 		routes:          routes,
 		stats:           newRouterStats(routes, statsEnabled),
-	}
+	}, nil
 }
 
 func (r *Router) Clone() *Router {
@@ -77,6 +81,7 @@ func (r *Router) Route(data []byte) string {
 	return r.routeWithStats(data)
 }
 
+// routeWithStats routes one payload while updating route and fallback counters.
 func (r *Router) routeWithStats(data []byte) string {
 	shortPayload := false
 	for i, route := range r.routes {
@@ -140,7 +145,8 @@ type route struct {
 	upstream   string
 }
 
-func newRoute(id int, config sd_config.RouteConfig) *route {
+// newRoute validates and compiles one route and all of its conditions.
+func newRoute(id int, config sd_config.RouteConfig) (*route, error) {
 	name := config.Name
 	if name == "" {
 		name = "route-" + strconv.Itoa(id)
@@ -151,18 +157,22 @@ func newRoute(id int, config sd_config.RouteConfig) *route {
 
 	configs := config.Conditions
 	if len(configs) == 0 {
-		logrus.Panicf("conditions are required in route %d", id)
+		return nil, fmt.Errorf("conditions are required in route %d", id)
 	}
 
 	conditions := make([]condition, 0, len(configs))
 	for _, config := range configs {
-		conditions = append(conditions, newCondition(id, config))
+		condition, err := newCondition(id, config)
+		if err != nil {
+			return nil, err
+		}
+		conditions = append(conditions, condition)
 	}
 	return &route{
 		name:       name,
 		conditions: conditions,
 		upstream:   config.Upstream,
-	}
+	}, nil
 }
 
 func (r *route) matchStatus(data []byte) (bool, bool) {

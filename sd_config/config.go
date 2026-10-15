@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-)
+	"reflect"
 
-var GlobalConfig = new(Config)
+	"github.com/near-notfaraway/stevedore/sd_util"
+)
 
 type Config struct {
 	Common  *CommonConfig
@@ -15,6 +16,48 @@ type Config struct {
 	Server  *ServerConfig
 	Upload  *UploadConfig
 	Session *SessionConfig
+}
+
+func Load(path string) (*Config, error) {
+	config := new(Config)
+	if err := sd_util.UnmarshalFile(path, config); err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	if config.Common == nil {
+		return nil, fmt.Errorf("common config is required")
+	}
+	if err := config.TestCommon(); err != nil {
+		return nil, fmt.Errorf("test common config: %w", err)
+	}
+	return config, nil
+}
+
+// ValidateUploadReload rejects changes outside the dynamically reloadable Upload section.
+func ValidateUploadReload(current, next *Config) error {
+	if current == nil {
+		return fmt.Errorf("current config is required")
+	}
+	if next == nil {
+		return fmt.Errorf("next config is required")
+	}
+
+	sections := []struct {
+		name    string
+		current any
+		next    any
+	}{
+		{name: "Common", current: current.Common, next: next.Common},
+		{name: "PProf", current: current.PProf, next: next.PProf},
+		{name: "Log", current: current.Log, next: next.Log},
+		{name: "Server", current: current.Server, next: next.Server},
+		{name: "Session", current: current.Session, next: next.Session},
+	}
+	for _, section := range sections {
+		if !reflect.DeepEqual(section.current, section.next) {
+			return fmt.Errorf("non-Upload config changed: %s", section.name)
+		}
+	}
+	return nil
 }
 
 // test common config before option handle finished
@@ -37,11 +80,6 @@ func (c *Config) TestCommon() error {
 		c.Common.PidPath = filepath.Join(filepath.Dir(execPath), "stevedore.pid")
 	}
 
-	return nil
-}
-
-// test all config before listen and serve
-func (c *Config) TestCompletely() error {
 	return nil
 }
 

@@ -13,28 +13,66 @@ type uploadRegistry struct {
 	router           *sd_route.Router
 }
 
-func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) *uploadRegistry {
+// validateUploadConfig checks routing and upstream definitions without starting runtime resources.
+func validateUploadConfig(config *sd_config.UploadConfig, statsEnabled bool) (*sd_route.Router, error) {
+	if config == nil {
+		return nil, fmt.Errorf("upload config is required")
+	}
 	upstreamNames := make(map[string]struct{}, len(config.Upstreams))
 	for _, upstreamConfig := range config.Upstreams {
+		if upstreamConfig == nil {
+			return nil, fmt.Errorf("upstream config is required")
+		}
 		if upstreamConfig.Name == "" || upstreamConfig.Name == sd_route.DropUpstream {
-			panic(fmt.Sprintf("upstream name %q is reserved", upstreamConfig.Name))
+			return nil, fmt.Errorf("upstream name %q is reserved", upstreamConfig.Name)
 		}
 		if _, ok := upstreamNames[upstreamConfig.Name]; ok {
-			panic(fmt.Sprintf("upstream name %q is duplicated", upstreamConfig.Name))
+			return nil, fmt.Errorf("upstream name %q is duplicated", upstreamConfig.Name)
 		}
 		upstreamNames[upstreamConfig.Name] = struct{}{}
 	}
-	validateUpstreamTargets(config, upstreamNames)
+	if err := validateUpstreamTargets(config, upstreamNames); err != nil {
+		return nil, err
+	}
+	router, err := sd_route.NewRouter(config.DefaultUpstream, config.Routes, statsEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("build router: %w", err)
+	}
+	for _, upstreamConfig := range config.Upstreams {
+		if err := sd_upstream.ValidateConfig(upstreamConfig); err != nil {
+			return nil, fmt.Errorf("validate upstream %q: %w", upstreamConfig.Name, err)
+		}
+	}
+	return router, nil
+}
+
+// newUploadRegistry validates Upload configuration and builds its shared control plane.
+func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) (*uploadRegistry, error) {
+	router, err := validateUploadConfig(config, statsEnabled)
+	if err != nil {
+		return nil, err
+	}
 
 	definitions := make([]upstreamDefinition, 0, len(config.Upstreams))
 	for _, upstreamConfig := range config.Upstreams {
-		definitions = append(definitions, upstreamDefinition{
+		group, err := sd_upstream.NewPeerGroup(upstreamConfig)
+		if err != nil {
+			closeUpstreamDefinitions(definitions)
+			return nil, fmt.Errorf("build upstream %q peer group: %w", upstreamConfig.Name, err)
+		}
+		definition := upstreamDefinition{
 			name:             upstreamConfig.Name,
 			upstreamType:     upstreamConfig.Type,
 			keyExtractor:     upstreamConfig.KeyExtractor,
 			invalidKeyPolicy: upstreamConfig.InvalidKeyPolicy,
-			group:            sd_upstream.NewPeerGroup(upstreamConfig),
-		})
+			group:            group,
+		}
+		if _, err := definition.newUpstream(); err != nil {
+			group.Close()
+			closeUpstreamDefinitions(definitions)
+			return nil, fmt.Errorf("build upstream %q: %w", upstreamConfig.Name, err)
+		}
+		definitions = append(definitions, definition)
 	}
 
 	upstreamRegistry := &upstreamRegistry{
@@ -43,15 +81,23 @@ func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) *uploa
 	}
 	return &uploadRegistry{
 		upstreamRegistry: upstreamRegistry,
-		router:           sd_route.NewRouter(config.DefaultUpstream, config.Routes, statsEnabled),
-	}
+		router:           router,
+	}, nil
 }
 
-func (r *uploadRegistry) newManager() *uploadManager {
-	return &uploadManager{
-		upstreamManager: r.upstreamRegistry.newManager(),
-		router:          r.router.Clone(),
+func (r *uploadRegistry) newManager() (*uploadManager, error) {
+	manager, err := r.upstreamRegistry.newManager()
+	if err != nil {
+		return nil, err
 	}
+	return &uploadManager{
+		upstreamManager: manager,
+		router:          r.router.Clone(),
+	}, nil
+}
+
+func (r *uploadRegistry) close() {
+	closeUpstreamDefinitions(r.upstreamRegistry.definitions)
 }
 
 type upstreamRegistry struct {
@@ -59,12 +105,16 @@ type upstreamRegistry struct {
 	statsEnabled bool
 }
 
-func (r *upstreamRegistry) newManager() *sd_upstream.Manager {
+func (r *upstreamRegistry) newManager() (*sd_upstream.Manager, error) {
 	upstreams := make(map[string]sd_upstream.Upstream, len(r.definitions))
 	for _, definition := range r.definitions {
-		upstreams[definition.name] = definition.newUpstream()
+		upstream, err := definition.newUpstream()
+		if err != nil {
+			return nil, fmt.Errorf("build upstream %q: %w", definition.name, err)
+		}
+		upstreams[definition.name] = upstream
 	}
-	return sd_upstream.NewManager(upstreams, r.statsEnabled)
+	return sd_upstream.NewManager(upstreams, r.statsEnabled), nil
 }
 
 type upstreamDefinition struct {
@@ -75,13 +125,19 @@ type upstreamDefinition struct {
 	group            *sd_upstream.PeerGroup
 }
 
-func (u *upstreamDefinition) newUpstream() sd_upstream.Upstream {
+func (u *upstreamDefinition) newUpstream() (sd_upstream.Upstream, error) {
 	return sd_upstream.NewUpstream(&sd_config.UpstreamConfig{
 		Name:             u.name,
 		Type:             u.upstreamType,
 		KeyExtractor:     u.keyExtractor,
 		InvalidKeyPolicy: u.invalidKeyPolicy,
 	}, u.group)
+}
+
+func closeUpstreamDefinitions(definitions []upstreamDefinition) {
+	for i := len(definitions) - 1; i >= 0; i-- {
+		definitions[i].group.Close()
+	}
 }
 
 type uploadStats struct {
@@ -113,10 +169,10 @@ func (m *uploadManager) stats() uploadStats {
 	}
 }
 
-func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[string]struct{}) {
+func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[string]struct{}) error {
 	if config.DefaultUpstream != "" && config.DefaultUpstream != sd_route.DropUpstream {
 		if _, ok := upstreamNames[config.DefaultUpstream]; !ok {
-			panic(fmt.Sprintf("default upstream %q does not exist", config.DefaultUpstream))
+			return fmt.Errorf("default upstream %q does not exist", config.DefaultUpstream)
 		}
 	}
 
@@ -125,7 +181,8 @@ func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[s
 			continue
 		}
 		if _, ok := upstreamNames[route.Upstream]; !ok {
-			panic(fmt.Sprintf("upstream %q for route %d does not exist", route.Upstream, id))
+			return fmt.Errorf("upstream %q for route %d does not exist", route.Upstream, id)
 		}
 	}
+	return nil
 }

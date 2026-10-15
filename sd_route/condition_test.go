@@ -10,7 +10,7 @@ import (
 )
 
 func TestRouterMatchesMaskedValue(t *testing.T) {
-	router := NewRouter("default", []sd_config.RouteConfig{
+	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 		{
 			Conditions: []sd_config.RouteConditionConfig{
 				{KeyBytes: "0:1", Operator: "==", Value: "0x80", Mask: "0xc0"},
@@ -42,7 +42,7 @@ func TestRouterRouteDoesNotAllocate(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			router := NewRouter("default", []sd_config.RouteConfig{
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
 				{
 					Conditions: []sd_config.RouteConditionConfig{
 						{
@@ -69,30 +69,32 @@ func TestRouterRouteDoesNotAllocate(t *testing.T) {
 }
 
 func TestNewRouterRejectsInvalidOperator(t *testing.T) {
-	require.Panics(t, func() {
-		NewRouter("default", []sd_config.RouteConfig{
-			{
-				Conditions: []sd_config.RouteConditionConfig{
-					{KeyBytes: "0:1", Operator: "invalid", Value: "0x01"},
-				},
-				Upstream: "target",
+	router, err := NewRouter("default", []sd_config.RouteConfig{
+		{
+			Conditions: []sd_config.RouteConditionConfig{
+				{KeyBytes: "0:1", Operator: "invalid", Value: "0x01"},
 			},
-		}, false)
-	})
+			Upstream: "target",
+		},
+	}, false)
+
+	require.Nil(t, router)
+	require.Error(t, err)
 }
 
 func TestNewRouterRejectsMalformedKeyBytes(t *testing.T) {
 	for _, keyBytes := range []string{"0", "0:1:2"} {
-		require.Panics(t, func() {
-			NewRouter("default", []sd_config.RouteConfig{
-				{
-					Conditions: []sd_config.RouteConditionConfig{
-						{KeyBytes: keyBytes, Operator: "==", Value: "0x01"},
-					},
-					Upstream: "target",
+		router, err := NewRouter("default", []sd_config.RouteConfig{
+			{
+				Conditions: []sd_config.RouteConditionConfig{
+					{KeyBytes: keyBytes, Operator: "==", Value: "0x01"},
 				},
-			}, false)
-		})
+				Upstream: "target",
+			},
+		}, false)
+
+		require.Nil(t, router)
+		require.Error(t, err)
 	}
 }
 
@@ -113,9 +115,10 @@ func TestNewRouterRejectsInvalidMaskSemantics(t *testing.T) {
 	}
 
 	for _, config := range tests {
-		require.Panics(t, func() {
-			NewRouter("default", []sd_config.RouteConfig{config}, false)
-		})
+		router, err := NewRouter("default", []sd_config.RouteConfig{config}, false)
+
+		require.Nil(t, router)
+		require.Error(t, err)
 	}
 }
 
@@ -130,9 +133,10 @@ func TestNewRouterRejectsInvalidConditionConfig(t *testing.T) {
 	}
 
 	for _, config := range tests {
-		require.Panics(t, func() {
-			NewRouter("", []sd_config.RouteConfig{config}, false)
-		})
+		router, err := NewRouter("", []sd_config.RouteConfig{config}, false)
+
+		require.Nil(t, router)
+		require.Error(t, err)
 	}
 }
 
@@ -148,7 +152,8 @@ func TestNewConditionConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("parses a valid condition", func() {
-			got := newCondition(0, config.Conditions[0])
+			got, err := newCondition(0, config.Conditions[0])
+			convey.So(err, convey.ShouldBeNil)
 			convey.So(got.bytesStart, convey.ShouldEqual, 0)
 			convey.So(got.bytesEnd, convey.ShouldEqual, 1)
 			convey.So(got.bytesValue, convey.ShouldResemble, []byte{1})
@@ -168,7 +173,8 @@ func TestConditionMatchStatusConvey(t *testing.T) {
 			Upstream: "target",
 		}
 		convey.Convey("reports short and matching payloads", func() {
-			c := newCondition(0, config.Conditions[0])
+			c, err := newCondition(0, config.Conditions[0])
+			convey.So(err, convey.ShouldBeNil)
 			matched, short := c.matchStatus(nil)
 			convey.So(matched, convey.ShouldBeFalse)
 			convey.So(short, convey.ShouldBeTrue)

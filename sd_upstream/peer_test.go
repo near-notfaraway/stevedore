@@ -13,8 +13,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func mustNewPeer(t testing.TB, id int, addr string, config *sd_config.PeerConfig) *Peer {
+	t.Helper()
+	peer, err := NewPeer(id, addr, config)
+	require.NoError(t, err)
+	return peer
+}
+
 func TestNewPeer(t *testing.T) {
-	peer := NewPeer(2, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 3})
+	peer := mustNewPeer(t, 2, "127.0.0.1:2345", &sd_config.PeerConfig{Weight: 3})
 
 	require.Equal(t, 2, peer.id)
 	require.Equal(t, "127.0.0.1:2345", peer.GetAddr())
@@ -35,7 +42,7 @@ func TestPeerReportsAddressFamily(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			peer := NewPeer(0, tt.addr, &sd_config.PeerConfig{Weight: 1})
+			peer := mustNewPeer(t, 0, tt.addr, &sd_config.PeerConfig{Weight: 1})
 			familyPeer, ok := any(peer).(interface{ GetFamily() int })
 
 			require.True(t, ok)
@@ -45,9 +52,10 @@ func TestPeerReportsAddressFamily(t *testing.T) {
 }
 
 func TestNewPeerRejectsInvalidAddress(t *testing.T) {
-	require.Panics(t, func() {
-		NewPeer(0, "invalid address", &sd_config.PeerConfig{Weight: 1})
-	})
+	peer, err := NewPeer(0, "invalid address", &sd_config.PeerConfig{Weight: 1})
+
+	require.Nil(t, peer)
+	require.EqualError(t, err, "resolve peer addr invalid address failed")
 }
 
 func TestPeerState(t *testing.T) {
@@ -69,7 +77,7 @@ func TestPeerSend(t *testing.T) {
 	require.NoError(t, err)
 	defer unix.Close(fd)
 
-	peer := NewPeer(0, receiver.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
+	peer := mustNewPeer(t, 0, receiver.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
 	payload := []byte("payload")
 	require.NoError(t, peer.Send(fd, payload))
 
@@ -89,7 +97,7 @@ func TestNewPeerConvey(t *testing.T) {
 				&unix.SockaddrInet6{},
 			)
 			defer patches.Reset()
-			peer := NewPeer(2, "[::1]:10001", peerConfig)
+			peer := mustNewPeer(t, 2, "[::1]:10001", peerConfig)
 			convey.So(peer.id, convey.ShouldEqual, 2)
 			convey.So(peer.GetFamily(), convey.ShouldEqual, unix.AF_INET6)
 			convey.So(peer.isAlive(), convey.ShouldBeTrue)

@@ -1,12 +1,12 @@
 package sd_route
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_util"
-	"github.com/sirupsen/logrus"
 )
 
 type condition struct {
@@ -17,7 +17,8 @@ type condition struct {
 	mask       []byte
 }
 
-func newCondition(routeID int, config sd_config.RouteConditionConfig) condition {
+// newCondition validates and compiles one payload matching condition.
+func newCondition(routeID int, config sd_config.RouteConditionConfig) (condition, error) {
 	switch config.Operator {
 	case sd_util.BytesOpEqual,
 		sd_util.BytesOpNotEqual,
@@ -26,51 +27,61 @@ func newCondition(routeID int, config sd_config.RouteConditionConfig) condition 
 		sd_util.BytesOpAndThenEqual,
 		sd_util.BytesOpAndThenNotEqual:
 	default:
-		logrus.Panicf("operator %s is invalid in route %d", config.Operator, routeID)
+		return condition{}, fmt.Errorf("operator %s is invalid in route %d", config.Operator, routeID)
 	}
 
 	bytesIdx := strings.Split(config.KeyBytes, ":")
 	if len(bytesIdx) != 2 {
-		logrus.Panicf("key bytes %s is invalid in route %d", config.KeyBytes, routeID)
+		return condition{}, fmt.Errorf("key bytes %s is invalid in route %d", config.KeyBytes, routeID)
 	}
 	bytesStart, err := strconv.Atoi(bytesIdx[0])
 	if err != nil {
-		logrus.Panicf("bytes start %s is invalid in route %d", bytesIdx[0], routeID)
+		return condition{}, fmt.Errorf("bytes start %s is invalid in route %d", bytesIdx[0], routeID)
 	}
 	bytesEnd, err := strconv.Atoi(bytesIdx[1])
 	if err != nil {
-		logrus.Panicf("bytes end %s is invalid in route %d", bytesIdx[1], routeID)
+		return condition{}, fmt.Errorf("bytes end %s is invalid in route %d", bytesIdx[1], routeID)
 	}
 	if bytesStart < 0 {
-		logrus.Panicf("bytes start %s is negative in route %d", bytesIdx[0], routeID)
+		return condition{}, fmt.Errorf("bytes start %s is negative in route %d", bytesIdx[0], routeID)
 	}
 	if bytesStart >= bytesEnd {
-		logrus.Panicf("bytes start %s is not less than bytes end %s in route %d", bytesIdx[0], bytesIdx[1], routeID)
+		return condition{}, fmt.Errorf(
+			"bytes start %s is not less than bytes end %s in route %d",
+			bytesIdx[0],
+			bytesIdx[1],
+			routeID,
+		)
 	}
 
 	bytesValue, err := sd_util.StringToBytes(config.Value)
 	if err != nil {
-		logrus.Panicf("value %s invalid in route %d: %v", config.Value, routeID, err)
+		return condition{}, fmt.Errorf("value %s invalid in route %d: %w", config.Value, routeID, err)
 	}
 	if len(bytesValue) != bytesEnd-bytesStart {
-		logrus.Panicf("value %s length is not equal to bytes length in route %d", config.Value, routeID)
+		return condition{}, fmt.Errorf("value %s length is not equal to bytes length in route %d", config.Value, routeID)
 	}
 
 	var mask []byte
 	if config.Mask != "" {
 		mask, err = sd_util.StringToBytes(config.Mask)
 		if err != nil {
-			logrus.Panicf("mask %s invalid in route %d: %v", config.Mask, routeID, err)
+			return condition{}, fmt.Errorf("mask %s invalid in route %d: %w", config.Mask, routeID, err)
 		}
 		if len(mask) != len(bytesValue) {
-			logrus.Panicf("mask %s length is not equal to bytes length in route %d", config.Mask, routeID)
+			return condition{}, fmt.Errorf("mask %s length is not equal to bytes length in route %d", config.Mask, routeID)
 		}
 		if config.Operator != sd_util.BytesOpEqual && config.Operator != sd_util.BytesOpNotEqual {
-			logrus.Panicf("mask is not supported with operator %s in route %d", config.Operator, routeID)
+			return condition{}, fmt.Errorf("mask is not supported with operator %s in route %d", config.Operator, routeID)
 		}
 		for i := range bytesValue {
 			if bytesValue[i]&^mask[i] != 0 {
-				logrus.Panicf("value %s contains bits outside mask %s in route %d", config.Value, config.Mask, routeID)
+				return condition{}, fmt.Errorf(
+					"value %s contains bits outside mask %s in route %d",
+					config.Value,
+					config.Mask,
+					routeID,
+				)
 			}
 		}
 	}
@@ -81,9 +92,10 @@ func newCondition(routeID int, config sd_config.RouteConditionConfig) condition 
 		bytesEnd:   bytesEnd,
 		bytesValue: bytesValue,
 		mask:       mask,
-	}
+	}, nil
 }
 
+// matchStatus evaluates one condition and reports payload truncation separately.
 func (c *condition) matchStatus(data []byte) (bool, bool) {
 	if len(data) < c.bytesEnd {
 		return false, true
@@ -107,6 +119,7 @@ func (c *condition) matchStatus(data []byte) (bool, bool) {
 	return c.matchBytes(bytes), false
 }
 
+// matchBytes applies the configured byte operator to an extracted payload range.
 func (c *condition) matchBytes(bytes []byte) bool {
 	matched := true
 	switch c.operator {

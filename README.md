@@ -58,6 +58,24 @@ cd output/stevedore
 bin/stevedore -config etc/config.example.json
 ```
 
+Stevedore 默认以前台方式运行，并在 `Common.PidPath` 持有 PID 文件锁。生产
+环境建议交由 systemd、Supervisor 或容器运行时管理；手工后台运行可使用：
+
+```bash
+nohup ./stevedore -config sd_config/config.example.json >stevedore.out 2>&1 &
+```
+
+运行中的进程可通过同一配置文件管理：
+
+```bash
+./stevedore -config sd_config/config.example.json -signal reload
+./stevedore -config sd_config/config.example.json -signal stop
+./stevedore -config sd_config/config.example.json -signal quit
+```
+
+`reload` 重新加载 `Upload` 配置，`stop` 和 `quit` 会等待 Reactor 释放资源后
+退出。信号发送进程不会删除 PID 文件，PID 文件由运行进程在退出时清理。
+
 ### IPv6 配置
 
 `Server.ListenAddr` 是包含端口的完整监听地址，IPv6 地址必须使用方括号：

@@ -2,16 +2,15 @@ package sd_server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
-	"github.com/near-notfaraway/stevedore/sd_upstream"
 	"github.com/sirupsen/logrus"
 	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/require"
@@ -117,7 +116,7 @@ func TestReactorForwardsIPv6PacketAndResponse(t *testing.T) {
 
 	key := reactor.rxMC.GetRSockaddrKeyOfMsg(0)
 	sess := reactor.createSession(key)
-	peer := sd_upstream.NewPeer(0, backend.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
+	peer := mustNewPeer(t, 0, backend.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
 	sessionFD, err := reactor.getOrCreateSessionFD(sess, peer.GetFamily())
 	require.NoError(t, err)
 	require.NoError(t, peer.Send(sessionFD, upload))
@@ -219,6 +218,56 @@ func TestReactorServeConvey(t *testing.T) {
 	})
 }
 
+func TestReactorUpdateUploadManagerRunsInEventLoop(t *testing.T) {
+	oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
+	newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
+	selector := &commandSelector{wakeCh: make(chan struct{}, 1)}
+	r := newConveyReactor(oldManager)
+	r.selector = selector
+	patches := gomonkey.ApplyFuncReturn(unix.Close, nil)
+	defer patches.Reset()
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- r.serve(context.Background())
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, r.updateUploadManager(ctx, newManager))
+	require.NoError(t, <-serveDone)
+	require.Same(t, newManager, r.upstreamMgr)
+	require.Equal(t, 1, selector.wakes)
+}
+
+func TestReactorUpdateUploadManagerSkipsCanceledCommand(t *testing.T) {
+	oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
+	newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
+	r := newConveyReactor(oldManager)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, r.updateUploadManager(ctx, newManager), context.DeadlineExceeded)
+
+	r.processCommands()
+
+	require.Same(t, oldManager, r.upstreamMgr)
+}
+
+func TestReactorUpdateUploadManagerSkipsCommandAfterWakeFailure(t *testing.T) {
+	oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
+	newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
+	r := newConveyReactor(oldManager)
+	r.selector = &conveySelector{wakeErr: errors.New("wake failed")}
+
+	err := r.updateUploadManager(context.Background(), newManager)
+	require.Error(t, err)
+
+	r.processCommands()
+
+	require.Same(t, oldManager, r.upstreamMgr)
+}
+
 func TestReactorNowSecConvey(t *testing.T) {
 	convey.Convey("Test reactor.nowSec", t, func() {
 		convey.Convey("uses the monotonic origin", func() {
@@ -268,7 +317,7 @@ func TestReactorHandleUploadConvey(t *testing.T) {
 func TestReactorHandleUploadPacketConvey(t *testing.T) {
 	convey.Convey("Test reactor.handleUploadPacket", t, func() {
 		convey.Convey("creates a dropped session", func() {
-			manager := newTestUploadManager(nil, sd_route.NewRouter("", nil, false))
+			manager := newTestUploadManager(nil, mustNewRouter(t, "", nil, false))
 			r := newConveyReactor(manager)
 			patches := gomonkey.NewPatches()
 			patches.ApplyMethodReturn(r.rxMC, "GetLengthOfMsg", uint32(1))
@@ -384,7 +433,95 @@ type conveySelector struct {
 	added   []int
 	deleted []int
 	wakes   int
+	wakeErr error
 	pollErr error
+}
+
+type commandSelector struct {
+	wakeCh chan struct{}
+	wakes  int
+}
+
+type loopCommandSelector struct {
+	wakeCh    chan struct{}
+	wakeErr   error
+	wakeCount int
+	failAt    int
+}
+
+func (s *commandSelector) Add(int, sd_socket.SelectorEvent) error {
+	return nil
+}
+
+func (s *commandSelector) Mod(int, sd_socket.SelectorEvent) error {
+	return nil
+}
+
+func (s *commandSelector) Del(int) error {
+	return nil
+}
+
+func (s *commandSelector) Wake() error {
+	s.wakes++
+	s.wakeCh <- struct{}{}
+	return nil
+}
+
+func (s *commandSelector) Polling(
+	ctx context.Context,
+	_ int,
+	handle func([]sd_socket.PolledEvent),
+) error {
+	select {
+	case <-s.wakeCh:
+		handle(nil)
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+func (s *commandSelector) Close() error {
+	return nil
+}
+
+func (s *loopCommandSelector) Add(int, sd_socket.SelectorEvent) error {
+	return nil
+}
+
+func (s *loopCommandSelector) Mod(int, sd_socket.SelectorEvent) error {
+	return nil
+}
+
+func (s *loopCommandSelector) Del(int) error {
+	return nil
+}
+
+func (s *loopCommandSelector) Wake() error {
+	s.wakeCount++
+	if s.wakeErr != nil && (s.failAt == 0 || s.wakeCount >= s.failAt) {
+		return s.wakeErr
+	}
+	s.wakeCh <- struct{}{}
+	return nil
+}
+
+func (s *loopCommandSelector) Polling(
+	ctx context.Context,
+	_ int,
+	handle func([]sd_socket.PolledEvent),
+) error {
+	for {
+		select {
+		case <-s.wakeCh:
+			handle(nil)
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (s *loopCommandSelector) Close() error {
+	return nil
 }
 
 func (s *conveySelector) Add(fd int, _ sd_socket.SelectorEvent) error {
@@ -403,7 +540,7 @@ func (s *conveySelector) Del(fd int) error {
 
 func (s *conveySelector) Wake() error {
 	s.wakes++
-	return nil
+	return s.wakeErr
 }
 
 func (s *conveySelector) Polling(
@@ -437,5 +574,6 @@ func newConveyReactor(manager *uploadManager) *reactor {
 		recvBatchLimit: 1,
 		clockStart:     time.Now(),
 		logger:         logrus.New().WithField("test", true),
+		commandCh:      make(chan *reactorCommand, reactorCommandQueueSize),
 	}
 }
