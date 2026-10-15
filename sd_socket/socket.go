@@ -2,8 +2,8 @@ package sd_socket
 
 import (
 	"fmt"
+
 	"golang.org/x/sys/unix"
-	"syscall"
 )
 
 // Create a udp socket which bound addr, also support general flag
@@ -25,6 +25,7 @@ func UDPBoundSocket(sa unix.Sockaddr, nonblock, reuseAddr, reusePort bool) (int,
 	}
 
 	if err = unix.Bind(fd, sa); err != nil {
+		_ = unix.Close(fd)
 		return -1, fmt.Errorf("bind sockaddr failed: %w", err)
 	}
 
@@ -38,51 +39,28 @@ func UDPSocket(family int, nonblock, reuseAddr, reusePort bool) (int, error) {
 		return -1, fmt.Errorf("family is not inet")
 	}
 
-	typ := unix.SOCK_DGRAM | unix.SOCK_CLOEXEC
-	if nonblock {
-		typ |= unix.SOCK_NONBLOCK
-	}
-
-	fd, err := unix.Socket(family, typ, unix.IPPROTO_UDP)
+	fd, err := newUDPSocket(family, nonblock)
 	if err != nil {
 		return -1, fmt.Errorf("create socket failed: %w", err)
 	}
 
 	if reuseAddr {
-		err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+		err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 		if err != nil {
+			_ = unix.Close(fd)
 			return -1, fmt.Errorf("setsockopt reuseaddr failed: %w", err)
 		}
 	}
 
 	if reusePort {
-		err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+		err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 		if err != nil {
+			_ = unix.Close(fd)
 			return -1, fmt.Errorf("setsockopt reuseport failed: %w", err)
 		}
 	}
 
 	return fd, nil
-}
-
-// Set send or recv timeout for socket
-// Returns err if set fails
-func SetSocketTimeout(fd, sTimeoutSec, rTimeoutSec int) error {
-	if sTimeoutSec > 0 {
-		if err := syscall.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO,
-			&syscall.Timeval{Sec: int64(sTimeoutSec)}); err != nil {
-			return fmt.Errorf("set fd %d send timeout fail: %w", fd, err)
-		}
-	}
-
-	if rTimeoutSec > 0 {
-		if err := syscall.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO,
-			&syscall.Timeval{Sec: int64(rTimeoutSec)}); err != nil {
-			return fmt.Errorf("set fd %d recv timeout fail: %w",  fd, err)
-		}
-	}
-
-	return nil
 }
 
 // Send data to specified addr through specified fd
@@ -99,5 +77,4 @@ func SendTo(fd int, p []byte, flags int, to unix.Sockaddr) error {
 
 		return nil
 	}
-
 }

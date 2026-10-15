@@ -1,119 +1,131 @@
 package sd_server
 
 import (
-	"context"
-	"github.com/near-notfaraway/stevedore/sd_socket"
+	"fmt"
+
+	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
-	"os"
 )
 
-func (s *Server) uploadWorker(ctx context.Context, worker *UploadWorker) {
-	// init logger for upload worker
-	logger := logrus.WithField("work_id", worker.id)
-	logger.Debug("init upload worker")
-	mc := s.mcPool.GetMMsgContainerFromPool()
-	defer s.mcPool.PutMMsgContainerToPool(mc)
+type uploadRegistry struct {
+	upstreamRegistry *upstreamRegistry
+	router           *sd_route.Router
+}
 
-	logger.Debug("wait for read event until ctx canceled")
-	for {
-		select {
-		case <-ctx.Done():
-			return
+func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) *uploadRegistry {
+	upstreamNames := make(map[string]struct{}, len(config.Upstreams))
+	for _, upstreamConfig := range config.Upstreams {
+		if upstreamConfig.Name == "" || upstreamConfig.Name == sd_route.DropUpstream {
+			panic(fmt.Sprintf("upstream name %q is reserved", upstreamConfig.Name))
+		}
+		if _, ok := upstreamNames[upstreamConfig.Name]; ok {
+			panic(fmt.Sprintf("upstream name %q is duplicated", upstreamConfig.Name))
+		}
+		upstreamNames[upstreamConfig.Name] = struct{}{}
+	}
+	validateUpstreamTargets(config, upstreamNames)
 
-		case <-worker.ch:
-			logger.Debug("a read event came in, continue batch recv packets")
-			for {
-				logger.Debug("do batch recv packets")
-				nPkt, errno := sd_socket.RecvMMsg(worker.fd, mc)
-				if nPkt < 1 || errno != 0 {
-					if errno == unix.EAGAIN || errno == unix.EWOULDBLOCK {
-						logger.Debug("no packets to recv, should wait for recv event again")
-					} else {
-						logger.Errorf("recv packets failed: %s", os.NewSyscallError("recvmmsg", errno).Error())
-					}
-					break
-				}
+	definitions := make([]upstreamDefinition, 0, len(config.Upstreams))
+	for _, upstreamConfig := range config.Upstreams {
+		definitions = append(definitions, upstreamDefinition{
+			name:             upstreamConfig.Name,
+			upstreamType:     upstreamConfig.Type,
+			keyExtractor:     upstreamConfig.KeyExtractor,
+			invalidKeyPolicy: upstreamConfig.InvalidKeyPolicy,
+			group:            sd_upstream.NewPeerGroup(upstreamConfig),
+		})
+	}
 
-				logger.Debugf("recv %d packets, process packets one by one", nPkt)
-				for i := 0; i < nPkt; i++ {
-					logger.Debugf("processing packet %d and extract info", i)
-					nr := mc.GetLengthOfMsg(i)
-					buf := mc.GetBufOfMsg(i)
-					rName := mc.GetRNamesOfMsg(i)
-					rSockaddr := mc.GetRSockaddrOfMsg(i)
-					logger.Debugf("packet info: remote addr is %v, data is %v",
-						sd_socket.SockaddrToUDPAddr(rSockaddr).String(), buf[:nr])
+	upstreamRegistry := &upstreamRegistry{
+		definitions:  definitions,
+		statsEnabled: statsEnabled,
+	}
+	return &uploadRegistry{
+		upstreamRegistry: upstreamRegistry,
+		router:           sd_route.NewRouter(config.DefaultUpstream, config.Routes, statsEnabled),
+	}
+}
 
-					// get session or create session
-					sess := s.sessionMgr.GetSession(rName)
-					if sess == nil {
-						logger.Debugf("try create new session for packet")
-						var got bool
-						_sess, got, err := s.sessionMgr.GetOrCreateSession(rName, rSockaddr)
-						if err != nil {
-							logger.Errorf("create session failed: %v", err)
-							continue
-						}
+func (r *uploadRegistry) newManager() *uploadManager {
+	return &uploadManager{
+		upstreamManager: r.upstreamRegistry.newManager(),
+		router:          r.router.Clone(),
+	}
+}
 
-						if !got {
-							logger.Debugf("init new session %p for packet", _sess)
+type upstreamRegistry struct {
+	definitions  []upstreamDefinition
+	statsEnabled bool
+}
 
-							s.fdReadHandlers.Store(_sess.GetFD(), func() { _sess.GetCh() <- struct{}{} })
-							if err = s.selector.Add(_sess.GetFD(), sd_socket.SelectorEventRead); err != nil {
-								logger.Errorf("add selector for session failed: %v", err)
-								s.fdReadHandlers.Delete(_sess.GetFD())
-								continue
-							}
-							go s.downloadWorker(_sess.GetCtx(), _sess)
+func (r *upstreamRegistry) newManager() *sd_upstream.Manager {
+	upstreams := make(map[string]sd_upstream.Upstream, len(r.definitions))
+	for _, definition := range r.definitions {
+		upstreams[definition.name] = definition.newUpstream()
+	}
+	return sd_upstream.NewManager(upstreams, r.statsEnabled)
+}
 
-						} else {
-							logger.Debugf("session %p for packet is existed", _sess)
-						}
-						sess = _sess
+type upstreamDefinition struct {
+	name             string
+	upstreamType     string
+	keyExtractor     *sd_config.KeyExtractorConfig
+	invalidKeyPolicy string
+	group            *sd_upstream.PeerGroup
+}
 
-					} else {
-						logger.Debugf("session %p for packet is existed", sess)
-					}
+func (u *upstreamDefinition) newUpstream() sd_upstream.Upstream {
+	return sd_upstream.NewUpstream(&sd_config.UpstreamConfig{
+		Name:             u.name,
+		Type:             u.upstreamType,
+		KeyExtractor:     u.keyExtractor,
+		InvalidKeyPolicy: u.invalidKeyPolicy,
+	}, u.group)
+}
 
-					// get upstream
-					upstream := s.upstreamMgr.RouteUpstream(buf[:nr])
-					if upstream == nil {
-						logger.Info("can not route upstream")
-						continue
-					}
+type uploadStats struct {
+	route     sd_route.Stats
+	upstreams []sd_upstream.Stats
+}
 
-					logger.Debugf("try to get peer and send data to it")
-					succeed := false
-					for try := 0; try < s.config.Server.MaxTryTimes; try++ {
-						peer := upstream.SelectPeer(buf[:nr])
-						if peer == nil {
-							logrus.Errorf("select peer failed")
-							continue
-						}
+type uploadManager struct {
+	upstreamManager *sd_upstream.Manager
+	router          *sd_route.Router
+}
 
-						err := peer.Send(sess.GetFD(), buf[:nr])
-						if err != nil {
-							logrus.Warnf("upload to peer %s succeed", peer.GetAddr())
-							if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
-								peer.SetState(sd_upstream.PeerDead)
-								upstream.ResetPeers()
-							}
-							continue
-						}
+func (m *uploadManager) routeUpstream(data []byte) string {
+	return m.router.Route(data)
+}
 
-						logrus.Debugf("upload to peer %s succeed", peer.GetAddr())
-						succeed = true
-						break
-					}
+func (m *uploadManager) selectPeer(upstreamName string, data []byte) (*sd_upstream.Peer, bool) {
+	return m.upstreamManager.SelectPeer(upstreamName, data)
+}
 
-					// upload failed
-					if !succeed {
-						logrus.Error("upload packet failed, drop it")
-					}
-				}
-			}
+func (m *uploadManager) markPeerDead(upstreamName string, peer *sd_upstream.Peer) {
+	m.upstreamManager.MarkPeerDead(upstreamName, peer)
+}
+
+func (m *uploadManager) stats() uploadStats {
+	return uploadStats{
+		route:     m.router.Stats(),
+		upstreams: m.upstreamManager.Stats(),
+	}
+}
+
+func validateUpstreamTargets(config *sd_config.UploadConfig, upstreamNames map[string]struct{}) {
+	if config.DefaultUpstream != "" && config.DefaultUpstream != sd_route.DropUpstream {
+		if _, ok := upstreamNames[config.DefaultUpstream]; !ok {
+			panic(fmt.Sprintf("default upstream %q does not exist", config.DefaultUpstream))
+		}
+	}
+
+	for id, route := range config.Routes {
+		if route.Upstream == "" || route.Upstream == sd_route.DropUpstream {
+			continue
+		}
+		if _, ok := upstreamNames[route.Upstream]; !ok {
+			panic(fmt.Sprintf("upstream %q for route %d does not exist", route.Upstream, id))
 		}
 	}
 }

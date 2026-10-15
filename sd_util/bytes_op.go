@@ -12,7 +12,7 @@ const (
 )
 
 // Return bytes operate result and a error
-func BytesOperate(symbol string, leftVal, rightVal []byte) (bool, error) {
+func bytesOperate(symbol string, leftVal, rightVal []byte) (bool, error) {
 	if len(leftVal) != len(rightVal) {
 		return false, fmt.Errorf("should be the same length for operation")
 	}

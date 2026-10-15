@@ -1,72 +1,66 @@
 package sd_session
 
 import (
-	"context"
 	"github.com/near-notfaraway/stevedore/sd_socket"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
+// Session 同时作为 Reactor Session 表中的值和时间轮中的侵入式链表节点。
+// 它只允许由所属 Reactor goroutine 访问，因此字段不需要锁或原子操作。
 type Session struct {
-	ctx        context.Context    // control download worker close
-	cancel     context.CancelFunc // ctx cancel function
-	name       string             // string converted from downstream address
-	sa         unix.Sockaddr      // downstream sockaddr
-	lastActive int64              // last active timestamp base on second
-	fd         int                // fd used to upload packet
-	ch         chan struct{}      // fd used to recv download event
+	key       sd_socket.SockaddrKey // 所属 Reactor 中的下游地址键
+	fds       [2]int                // IPv4、IPv6 上游 socket fd
+	fdSet     [2]bool               // 对应地址族的 fd 是否已创建
+	expiresAt int64                 // 绝对过期时间，单位秒
+	wheelSlot int                   // 当前所在的时间轮槽位
+	wheelPrev *Session              // 桶内前一个 Session
+	wheelNext *Session              // 桶内后一个 Session
+	inWheel   bool                  // 是否已链接到时间轮
 }
 
-func NewSession(name string, sa unix.Sockaddr) *Session {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewSession(key sd_socket.SockaddrKey) *Session {
+	return &Session{key: key}
+}
 
-	return &Session{
-		ctx:        ctx,
-		cancel:     cancel,
-		name:       name,
-		sa:         sa,
-		lastActive: time.Now().Unix(),
+func (s *Session) GetKey() sd_socket.SockaddrKey {
+	return s.key
+}
+
+func (s *Session) GetFDByFamily(family int) (int, bool) {
+	index, ok := fdFamilyIndex(family)
+	if !ok || !s.fdSet[index] {
+		return 0, false
 	}
+	return s.fds[index], true
 }
 
-func (s *Session) UpdateActive() {
-	atomic.StoreInt64(&s.lastActive, time.Now().Unix())
-}
-
-func (s *Session) LastActive() int64 {
-	return atomic.LoadInt64(&s.lastActive)
-}
-
-func (s *Session) GetCtx() context.Context {
-	return s.ctx
-}
-
-func (s *Session) GetName() string {
-	return s.name
-}
-
-func (s *Session) GetSockaddr() unix.Sockaddr {
-	return s.sa
-}
-
-func (s *Session) GetFD() int {
-	return s.fd
-}
-
-func (s *Session) GetCh() chan struct{} {
-	return s.ch
-}
-
-func (s *Session) Close(selector sd_socket.Selector, evChanPool sync.Pool) {
-	if err := selector.Del(s.fd); err != nil {
-		logrus.Errorf("delete fd from selector failed: %v", err)
+func (s *Session) SetFD(family, fd int) bool {
+	index, ok := fdFamilyIndex(family)
+	if !ok {
+		return false
 	}
-	s.cancel()
-	evChanPool.Put(s.ch)
-	if err := unix.Close(s.fd); err != nil {
-		logrus.Errorf("close fd failed: %v", err)
+	s.fds[index] = fd
+	s.fdSet[index] = true
+	return true
+}
+
+func (s *Session) GetFDs() []int {
+	fds := make([]int, 0, len(s.fds))
+	for i, fd := range s.fds {
+		if s.fdSet[i] {
+			fds = append(fds, fd)
+		}
+	}
+	return fds
+}
+
+func fdFamilyIndex(family int) (int, bool) {
+	switch family {
+	case unix.AF_INET:
+		return 0, true
+	case unix.AF_INET6:
+		return 1, true
+	default:
+		return 0, false
 	}
 }

@@ -56,23 +56,22 @@ type PProfConfig struct {
 }
 
 type LogConfig struct {
-	Path             string // log file path
-	Level            string // log level
-	Verbose          bool   // log caller information
-	MaxAgeHour       int    // max age for clean up expired log
-	RotationTimeHour int    // time interval of rotating log
+	Path                   string // log file path
+	Level                  string // log level
+	Verbose                bool   // log caller information
+	MaxAgeHour             int    // max age for clean up expired log
+	RotationTimeHour       int    // time interval of rotating log
+	UploadStatsIntervalSec int    // upload stats log interval; disabled when <= 0
 }
 
 type ServerConfig struct {
-	ListenAddr         string // listening address
-	ListenParallel     int    // number of worker listening at the same time
-	EventSize          int    // size of events polling from selector
-	EventChanSize      int    // size of events delivering to worker non-blocking
-	BatchSize          int    // size of batch read/write packets
-	BufSize            int    // size of single read/write buffer
-	TaskPoolSize       int    // capacity of task pool
-	TaskPoolTimeoutSec int    // timeout of worker in task pool
-	MaxTryTimes        int    // max try times of upload packet to upstream
+	ListenAddr          string // listening address
+	ListenParallel      int    // requested reactors; Darwin currently uses one
+	EventSize           int    // size of events polling from each selector
+	BatchSize           int    // size of batch read/write packets
+	BufSize             int    // size of single read/write buffer
+	MaxRecvBatchesPerFD int    // max recvmmsg calls per fd in one reactor round
+	MaxTryTimes         int    // max try times of upload packet to upstream
 }
 
 type UploadConfig struct {
@@ -82,11 +81,31 @@ type UploadConfig struct {
 }
 
 type UpstreamConfig struct {
-	Name          string
-	Type          string
-	KeyBytes      string
-	Peers         []*PeerConfig
-	HealthChecker *HealthCheckerConfig
+	Name             string
+	Type             string
+	KeyExtractor     *KeyExtractorConfig
+	InvalidKeyPolicy string
+	Peers            []*PeerConfig
+	HealthChecker    *HealthCheckerConfig
+}
+
+type KeyExtractorConfig struct {
+	Type        string
+	Fixed       *FixedKeyConfig
+	LengthField *LengthFieldKeyConfig
+}
+
+type FixedKeyConfig struct {
+	KeyBytes string
+	KeyMask  string
+}
+
+type LengthFieldKeyConfig struct {
+	KeyStart     int
+	LengthStart  int
+	LengthBytes  int
+	ByteOrder    string
+	MaxKeyLength int
 }
 
 type PeerConfig struct {
@@ -104,10 +123,16 @@ type HealthCheckerConfig struct {
 }
 
 type RouteConfig struct {
+	Name       string
+	Conditions []RouteConditionConfig
+	Upstream   string
+}
+
+type RouteConditionConfig struct {
 	Operator string
 	Value    string
+	Mask     string
 	KeyBytes string
-	Upstream string
 }
 
 type SessionConfig struct {

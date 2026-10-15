@@ -2,19 +2,20 @@ package sd_upstream
 
 import (
 	"fmt"
+	"sync/atomic"
+
 	"github.com/near-notfaraway/stevedore/sd_config"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"golang.org/x/sys/unix"
-	"sync"
 )
 
-type PeerState int
+type peerState int32
 
 const (
-	_ PeerState = iota
-	PeerAlive
-	PeerTemp
-	PeerDead
+	_ peerState = iota
+	peerAlive
+	peerTemp
+	peerDead
 )
 
 //------------------------------------------------------------------------------
@@ -22,12 +23,12 @@ const (
 //------------------------------------------------------------------------------
 
 type Peer struct {
-	mu       sync.RWMutex  // lock
 	id       int           // unique id
 	addr     string        // humane addr
 	sockaddr unix.Sockaddr // sockaddr for send packet
+	family   int           // sockaddr family
 	weight   int           // selected ratio
-	state    PeerState     // define if peer is available
+	state    int32         // atomic peerState
 }
 
 func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
@@ -36,33 +37,37 @@ func NewPeer(id int, addr string, config *sd_config.PeerConfig) *Peer {
 		panic(fmt.Errorf("resolve peer addr %s failed", addr))
 	}
 
+	family := unix.AF_INET
+	if _, ok := sockaddr.(*unix.SockaddrInet6); ok {
+		family = unix.AF_INET6
+	}
+
 	return &Peer{
 		id:       id,
 		addr:     addr,
 		sockaddr: sockaddr,
+		family:   family,
 		weight:   config.Weight,
-		state:    PeerAlive,
+		state:    int32(peerAlive),
 	}
 }
 
 func (p *Peer) Send(fd int, data []byte) error {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	return sd_socket.SendTo(fd, data, 0, p.sockaddr)
 }
 
-func (p *Peer) SetState(state PeerState) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.state = state
+func (p *Peer) setState(state peerState) {
+	atomic.StoreInt32(&p.state, int32(state))
 }
 
 func (p *Peer) isAlive() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.state == PeerAlive
+	return peerState(atomic.LoadInt32(&p.state)) == peerAlive
 }
 
 func (p *Peer) GetAddr() string {
 	return p.addr
+}
+
+func (p *Peer) GetFamily() int {
+	return p.family
 }

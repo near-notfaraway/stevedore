@@ -3,113 +3,144 @@ package sd_server
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/near-notfaraway/stevedore/sd_config"
-	"github.com/near-notfaraway/stevedore/sd_session"
 	"github.com/near-notfaraway/stevedore/sd_socket"
-	"github.com/near-notfaraway/stevedore/sd_upstream"
-	"github.com/near-notfaraway/stevedore/sd_util"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
-	"sync"
 )
 
-type UploadWorker struct {
-	id int           // unique worker id
-	fd int           // fd of listened socket
-	ch chan struct{} // channel for recv upload event
-}
-
 type Server struct {
-	config         *sd_config.Config            // global config
-	ctx            context.Context              // control context
-	workers        []*UploadWorker              // upload workers
-	taskPool       sd_util.TaskPool             // task pool for deliver events
-	selector       sd_socket.Selector           // poll events from fds
-	fdReadHandlers sync.Map                     // map[int]func(): map fd and its read event handler
-	sessionMgr     *sd_session.Manager          // manage sessions
-	upstreamMgr    *sd_upstream.Manager         // manage upstreams
-	mcPool         *sd_socket.MMsgContainerPool // allocate memory for recvmmsg
-	evChanPool     sync.Pool                    // allocate memory for event channel
+	reactors            []*reactor      // independent network shards
+	uploadRegistry      *uploadRegistry // shared routing and upstream state
+	uploadStatsInterval time.Duration
 }
 
 func NewServer(config *sd_config.Config) *Server {
-	selector, err := sd_socket.NewEpoller(config.Server.EventSize, true)
-	if err != nil {
-		logrus.Panicf("create selector failed %v", err)
+	listenSa := sd_socket.ResolveUDPSockaddr(config.Server.ListenAddr)
+	if listenSa == nil {
+		logrus.Panicf("resolve listen addr %s failed", config.Server.ListenAddr)
 	}
 
-	evChanPool := sync.Pool{
-		New: func() interface{} {
-			return make(chan struct{}, config.Server.EventChanSize)
-		},
+	parallel := config.Server.ListenParallel
+	if parallel < 1 {
+		parallel = 1
+	}
+	if parallel > 1 && !sd_socket.ReusePortShardingSupported() {
+		logrus.Warnf("listen parallelism %d is not supported by this platform; using 1", parallel)
+		parallel = 1
+	}
+	statsEnabled := config.Log != nil && config.Log.UploadStatsIntervalSec > 0
+	s := &Server{
+		reactors:       make([]*reactor, 0, parallel),
+		uploadRegistry: newUploadRegistry(config.Upload, statsEnabled),
+	}
+	if statsEnabled {
+		s.uploadStatsInterval = time.Duration(config.Log.UploadStatsIntervalSec) * time.Second
+	}
+	for i := 0; i < parallel; i++ {
+		reactor, err := newReactor(i, config, listenSa, s.uploadRegistry.newManager())
+		if err != nil {
+			for _, initialized := range s.reactors {
+				initialized.close()
+			}
+			logrus.Panicf("create reactor %d failed: %v", i, err)
+		}
+		s.reactors = append(s.reactors, reactor)
+	}
+	return s
+}
+
+func (s *Server) runUploadStatsLogger(ctx context.Context) {
+	if s.uploadStatsInterval <= 0 {
+		return
 	}
 
-	return &Server{
-		config:      config,
-		workers:     make([]*UploadWorker, 0, config.Server.ListenParallel),
-		taskPool:    sd_util.NewSimpleTaskPool(config.Server.TaskPoolSize, config.Server.TaskPoolTimeoutSec),
-		selector:    selector,
-		sessionMgr:  sd_session.NewManager(config.Session, evChanPool, selector),
-		upstreamMgr: sd_upstream.NewManager(config.Upload),
-		mcPool:      sd_socket.NewMMsgContainerPool(config.Server.BatchSize, config.Server.BufSize),
-		evChanPool:  evChanPool,
+	ticker := time.NewTicker(s.uploadStatsInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.logUploadStats()
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
+func (s *Server) logUploadStats() {
+	stats := s.uploadStats()
+	routes := make(map[string]uint64, len(stats.route.Routes))
+	for _, route := range stats.route.Routes {
+		routes[route.Name] = route.Matches
+	}
+	upstreams := make(map[string]map[string]uint64, len(stats.upstreams))
+	for _, upstream := range stats.upstreams {
+		upstreams[upstream.Name] = map[string]uint64{
+			"selections":         upstream.Selections,
+			"selection_failures": upstream.SelectionFailures,
+			"peer_failures":      upstream.PeerFailures,
+		}
+	}
+	logrus.WithFields(logrus.Fields{
+		"default_routes": stats.route.DefaultRoutes,
+		"short_payloads": stats.route.ShortPayloads,
+		"drops":          stats.route.Drops,
+		"routes":         routes,
+		"upstreams":      upstreams,
+	}).Info("upload stats")
+}
+
+func (s *Server) uploadStats() uploadStats {
+	if len(s.reactors) == 0 {
+		return uploadStats{}
+	}
+
+	stats := s.reactors[0].upstreamMgr.stats()
+	for _, reactor := range s.reactors[1:] {
+		addUploadStats(&stats, reactor.upstreamMgr.stats())
+	}
+	return stats
+}
+
 func (s *Server) ListenAndServe() error {
-	// build context
 	ctx, cancel := context.WithCancel(context.Background())
-	s.ctx = ctx
+	defer cancel()
 
-	// resolve addr
-	listenSa := sd_socket.ResolveUDPSockaddr(s.config.Server.ListenAddr)
-	if listenSa == nil {
-		return fmt.Errorf("resolve listen addr %s failed", s.config.Server.ListenAddr)
+	if s.uploadStatsInterval > 0 {
+		go s.runUploadStatsLogger(ctx)
 	}
 
-	parallel := s.config.Server.ListenParallel
-	for i := 0; i < parallel; i++ {
-		ch := s.evChanPool.Get().(chan struct{})
-		fd, err := sd_socket.UDPBoundSocket(listenSa, true, true, true)
-		if err != nil {
-			return fmt.Errorf("create listen socket failed: %w", err)
-		}
-
-		logrus.Debugf("store fd %d", fd)
-		s.fdReadHandlers.Store(fd, func() { ch <- struct{}{} })
-		if err = s.selector.Add(fd, sd_socket.SelectorEventRead); err != nil {
-			s.fdReadHandlers.Delete(fd)
-			return fmt.Errorf("add listen conn to selector failed: %w", err)
-		}
-
-		worker := &UploadWorker{id: i, fd: fd, ch: ch}
-		s.workers = append(s.workers, worker)
-		go s.uploadWorker(ctx, worker)
+	errCh := make(chan error, len(s.reactors))
+	for _, r := range s.reactors {
+		go func(r *reactor) {
+			errCh <- r.serve(ctx)
+		}(r)
 	}
 
-	// 关闭服务
-	defer func() {
-		for i := 0; i < parallel; i++ {
-			s.evChanPool.Put(s.workers[i].ch)
-			_ = unix.Close(s.workers[i].fd)
+	firstErr := <-errCh
+	cancel()
+	for i := 1; i < len(s.reactors); i++ {
+		if err := <-errCh; firstErr == nil && err != nil {
+			firstErr = err
 		}
-		cancel()
-	}()
+	}
+	if firstErr != nil {
+		return fmt.Errorf("reactor stopped: %w", firstErr)
+	}
+	return nil
+}
 
-	// 开始 polling
-	logrus.Debug("start polling...")
-	return s.selector.Polling(ctx, func(evs []unix.EpollEvent) {
-		for i := 0; i < len(evs); i++ {
-			fs, ok := s.fdReadHandlers.Load(int(evs[i].Fd))
-			if !ok {
-				continue
-			}
-			_fs := fs.(func())
-
-			// do read event
-			if (evs[i].Events & unix.EPOLLIN) > 0 {
-				s.taskPool.Go(_fs)
-			}
-		}
-	})
+func addUploadStats(total *uploadStats, current uploadStats) {
+	total.route.DefaultRoutes += current.route.DefaultRoutes
+	total.route.ShortPayloads += current.route.ShortPayloads
+	total.route.Drops += current.route.Drops
+	for i := range total.route.Routes {
+		total.route.Routes[i].Matches += current.route.Routes[i].Matches
+	}
+	for i := range total.upstreams {
+		total.upstreams[i].Selections += current.upstreams[i].Selections
+		total.upstreams[i].SelectionFailures += current.upstreams[i].SelectionFailures
+		total.upstreams[i].PeerFailures += current.upstreams[i].PeerFailures
+	}
 }

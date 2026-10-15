@@ -12,17 +12,16 @@
     "Level": "debug",
     "Verbose": false,
     "MaxAgeHour": 24,
-    "RotationTimeHour": 168
+    "RotationTimeHour": 168,
+    "UploadStatsIntervalSec": 0
   },
   "Server": {
     "ListenAddr": "0.0.0.0:2614",
     "ListenParallel": 4,
     "EventSize": 1024,
-    "EventChanSize": 1024,
     "BatchSize": 32,
     "BufSize": 4096,
-    "TaskPoolSize": 64,
-    "TaskPoolTimeoutSec": 10,
+    "MaxRecvBatchesPerFD": 8,
     "MaxTryTimes": 3
   },
   "Session": {
@@ -30,18 +29,28 @@
     "TimeoutSec": 30
   },
   "Upload": {
-    "DefaultUpstream": "deny",
+    "DefaultUpstream": "drop",
     "Routes": [
       {
-        "KeyBytes": "0:1",
-        "Operator": "==",
-        "Value": "0x69",
+        "Name": "default-magic",
+        "Conditions": [
+          {
+            "KeyBytes": "0:1",
+            "Operator": "==",
+            "Value": "0x69"
+          }
+        ],
         "Upstream": "default"
       },
       {
-        "KeyBytes": "1:4",
-        "Operator": "==",
-        "Value": "0x998877",
+        "Name": "rr-sample-magic",
+        "Conditions": [
+          {
+            "KeyBytes": "1:4",
+            "Operator": "==",
+            "Value": "0x998877"
+          }
+        ],
         "Upstream": "rr_sample"
       }
     ],
@@ -49,7 +58,14 @@
       {
         "Name": "default",
         "Type": "chash",
-        "KeyBytes": "1:3",
+        "KeyExtractor": {
+          "Type": "fixed",
+          "Fixed": {
+            "KeyBytes": "1:2,3:4",
+            "KeyMask": "0xff0f"
+          }
+        },
+        "InvalidKeyPolicy": "drop",
         "HealthChecker": {
           "HeartbeatIntervalSec": 5,
           "HeartbeatTimeoutSec": 3,
@@ -82,7 +98,7 @@
         },
         "Peers": [
           {
-            "IP": "10.0.0.3",
+            "IP": "2001:db8::3",
             "Port": 2345,
             "Weight": 1,
             "Backup": true
