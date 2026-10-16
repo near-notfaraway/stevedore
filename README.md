@@ -1,279 +1,223 @@
 # Stevedore
 
-## 简介
-Stevedore 实现了一个四层负载均衡，并且可根据四层数据包的字节内容进行灵活地转发，其主要特点有：
+Stevedore 是一个面向 UDP 的四层负载均衡器，可根据 payload 内容路由流量，并通过
+加权轮询或一致性哈希选择后端。
 
-- 四层协议目前支持 UDP，也可应用于 KCP、TFTP 协议，或基于 UDP 的一些私有协议
-- 支持 IPv4、IPv6 UDP 监听和后端转发，同一 Session 可访问不同地址族的后端
-- 数据包的上游选择，支持基于字节进行匹配，甚至基于比特来进行匹配
-- 数据包的负载均衡，支持组合多个字节区间并通过掩码提取 hash key
+## 特性
+
+- 支持 IPv4、IPv6 UDP 监听和转发，适用于 KCP、TFTP 及私有 UDP 协议
+- 支持按 payload 字节区间、掩码和比特条件选择 Upstream
+- 支持加权轮询（RR）和基于 payload key 的一致性哈希（CHash）
+- 支持固定区间、多区间拼接、掩码和长度字段等 key 提取方式
+- 支持后端健康检查，以及全部后端不可用时的 Backup 节点兜底
+- 支持运行时热更新 Routes、Upstreams、Peers 和健康检查配置
 - Linux 使用 `epoll`、`recvmmsg` 和 `sendmmsg` 优化转发性能
-- macOS 使用 `kqueue` 和兼容的逐包收发路径，便于本地开发与运行
-- 具有健康检查功能，支持指定一个正常参与负载均衡、全员不可用时强制兜底的节点
+- macOS 支持完整功能，便于本地开发和验证
 
-## 平台差异
-
-| 平台 | 事件机制 | UDP 收发 | `ListenParallel` |
-| --- | --- | --- | --- |
-| Linux | `epoll` + `eventfd` | `recvmmsg` + `sendmmsg` | 按配置启用 `SO_REUSEPORT` 分片 |
-| macOS | `kqueue` + `EVFILT_USER` | `recvfrom` + `sendmsg` 兼容批量接口 | 固定为 1，配置大于 1 时记录警告 |
-
-Linux 是生产性能目标。macOS 支持完整功能，但没有 Linux 的批量系统调用和
-`SO_REUSEPORT` 多 Reactor 分流能力。
+```text
+UDP client
+    |
+    v
+Routes / DefaultUpstream ---- drop ----> [discard]
+    |
+    v
+RR / CHash
+    |
+    v
+UDP Peer
+    |
+    +-------- session socket --------> UDP client
+```
 
 ## 快速开始
-### 编译
 
-安装 `go.mod` 指定版本的 Go 工具链后执行：
+项目使用 `go.mod` 指定的 Go 版本。
 
 ```bash
-# 测试当前平台
+# 测试并构建当前平台
 make test
-
-# 构建 Linux amd64 生产二进制：./stevedore
 make build
 
-# 构建当前 Mac 架构：./stevedore-darwin-arm64 或 amd64
+# 也可以显式构建 Linux amd64 或当前 Mac 架构
+make build-linux
 make build-darwin
-
-# 指定 Intel Mac
-make build-darwin DARWIN_ARCH=amd64
-
-# 测试、构建 Linux amd64 并打包到 output/
-make all
 ```
 
-### 启动
-
-直接构建后：
+复制并修改示例配置：
 
 ```bash
-./stevedore -config sd_config/config.example.json
+cp sd_config/config.example.json stevedore.config.json
 ```
 
-执行 `make all` 后：
+启动前先校验配置，再运行服务：
 
 ```bash
-cd output/stevedore
-bin/stevedore -config etc/config.example.json
+./stevedore -c stevedore.config.json -t
+./stevedore -c stevedore.config.json
 ```
 
-Stevedore 默认以前台方式运行，并在 `Common.PidPath` 持有 PID 文件锁。生产
-环境建议交由 systemd、Supervisor 或容器运行时管理；手工后台运行可使用：
+配置文件支持 JSON、JSONC 和 YAML，YAML 文件扩展名必须为 `.yaml`。执行 `make all`
+可以完成测试、构建和打包，产物位于 `output/stevedore/`。
 
-```bash
-nohup ./stevedore -config sd_config/config.example.json >stevedore.out 2>&1 &
-```
+## 配置
 
-运行中的进程可通过同一配置文件管理：
+完整配置参考：
 
-```bash
-./stevedore -config sd_config/config.example.json -signal reload
-./stevedore -config sd_config/config.example.json -signal stop
-./stevedore -config sd_config/config.example.json -signal quit
-```
+- [JSON 示例](sd_config/config.example.json)
 
-`reload` 重新加载 `Upload` 配置，`stop` 和 `quit` 会等待 Reactor 释放资源后
-退出。信号发送进程不会删除 PID 文件，PID 文件由运行进程在退出时清理。
+配置分为以下部分：
 
-### IPv6 配置
+| 配置段 | 作用 | 支持热更新 |
+| --- | --- | --- |
+| `Common` | 工作目录和 PID 文件 | 否 |
+| `PProf` | pprof 开关和监听地址 | 否 |
+| `Log` | 日志、轮转和统计周期 | 否 |
+| `Server` | UDP 监听和收发参数 | 否 |
+| `Session` | Session 回收和超时 | 否 |
+| `Upload` | Routes、Upstreams、Peers 和健康检查 | 是 |
 
-`Server.ListenAddr` 是包含端口的完整监听地址，IPv6 地址必须使用方括号：
+### 路由和负载均衡
+
+下面的配置将 payload 首字节为 `0x69` 的数据包转发到 `game` Upstream，其他数据包
+直接丢弃。同一 `data[1:5]` 会通过 CHash 稳定选择同一 Peer。
 
 ```json
-"Server": {
-  "ListenAddr": "[::]:2614"
-}
-```
-
-`Peer.IP` 只填写主机地址，不包含方括号或端口。一个 Upstream 可以同时配置
-IPv4 和 IPv6 Peer，健康检查与数据转发会分别使用对应地址族的 socket：
-
-```json
-"Peers": [
-  {
-    "IP": "10.0.0.1",
-    "Port": 2345,
-    "Weight": 1,
-    "Backup": false
-  },
-  {
-    "IP": "2001:db8::10",
-    "Port": 2345,
-    "Weight": 1,
-    "Backup": true
-  }
-]
-```
-
-链路本地地址可以在 `IP` 中携带 zone，例如 `"fe80::10%eth0"`。
-
-服务当前只配置一个 `ListenAddr`。`[::]:2614` 是否同时接收 IPv4 流量取决于
-操作系统的 `IPV6_V6ONLY` 默认行为，不作为跨平台双栈保证。需要明确同时提供
-IPv4、IPv6 入口时，应分别部署监听 `0.0.0.0:2614` 和 `[::]:2614` 的实例。
-
-## 典型使用场景
-### 连接 ID 保持
-#### 场景说明
-对于连接 ID 位于固定字节区间的协议，可以直接从 payload 中提取连接 ID 作为一致性哈希
-key。以 KCP 为例，其报文结构如下：
-
-```
-0               4   5   6       8 (BYTE)
-+---------------+---+---+-------+
-|     conv      |cmd|frg|  wnd  |
-+---------------+---+---+-------+   8
-|     ts        |     sn        |
-+---------------+---------------+  16
-|     una       |     len       |
-+---------------+---------------+  24
-|                               |
-|        DATA (optional)        |
-|                               |
-+-------------------------------+
-```
-
-`conv` 是位于 `data[0:4]` 的连接 ID。KCP 使用它标识逻辑连接，因此同一 `conv` 的数据包
-需要持续转发到同一节点。固定布局和由报文长度字段确定边界的 key 都通过
-`KeyExtractor` 配置。
-
-#### 转发效果
-使用 `conv` 作为 `chash` key 后，在可用 Peer 集合不变时，相同 `conv` 会选择相同的后端，
-不同 `conv` 可以独立分片。即使同一客户端复用源地址和端口维持多个 KCP 连接，也会按照
-各自的 `conv` 正确转发。
-
-![](doc/media/example1-01.jpeg)
-
-#### 配置
-``` json
-"Upload": {
-  "DefaultUpstream": "kcp",         // 默认转发至 kcp Upstream
-  "Upstreams": [
-    {
-      "Name": "kcp",
-      "Type": "chash",              // 一致性哈希
-      "KeyExtractor": {
-        "Type": "fixed",
-        "Fixed": {
-          "KeyBytes": "0:4"         // 使用 data[0:4] 作为 hash key
-        }
-      },
-      "InvalidKeyPolicy": "drop",   // payload 过短时丢弃
-      "HealthChecker": {
-        "HeartbeatIntervalSec": 5,
-        "HeartbeatTimeoutSec": 3,
-        "SuccessTimes": 1,
-        "FailedTimes": 1
-      },
-      "Peers": [
-        {
-          "IP": "10.0.0.1",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": true
-        },
-        {
-          "IP": "10.0.0.2",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": false
-        },
-        {
-          "IP": "10.0.0.3",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": false
-        }
-      ]
-    }
-  ]
-}
-```
-
-### 可变长业务字段
-对于 key 长度由报文字段描述的协议，可以使用 `length_field` extractor。假设
-`data[1:3]` 是大端无符号长度，key 从 `data[4]` 开始：
-
-``` json
 {
-  "Name": "variable-key",
+  "Upload": {
+    "DefaultUpstream": "drop",
+    "Routes": [
+      {
+        "Name": "game-traffic",
+        "Conditions": [
+          {
+            "KeyBytes": "0:1",
+            "Operator": "==",
+            "Value": "0x69"
+          }
+        ],
+        "Upstream": "game"
+      }
+    ],
+    "Upstreams": [
+      {
+        "Name": "game",
+        "Type": "chash",
+        "KeyExtractor": {
+          "Type": "fixed",
+          "Fixed": {
+            "KeyBytes": "1:5"
+          }
+        },
+        "InvalidKeyPolicy": "drop",
+        "HealthChecker": {
+          "HeartbeatIntervalSec": 5,
+          "HeartbeatTimeoutSec": 3,
+          "SuccessTimes": 1,
+          "FailedTimes": 1
+        },
+        "Peers": [
+          {
+            "IP": "10.0.0.1",
+            "Port": 2345,
+            "Weight": 1,
+            "Backup": true
+          },
+          {
+            "IP": "10.0.0.2",
+            "Port": 2345,
+            "Weight": 1,
+            "Backup": false
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+路由规则：
+
+- 多条 `Routes` 按顺序匹配，首个命中的规则生效
+- 同一 Route 的多个 `Conditions` 使用 AND 语义
+- `Operator` 支持 `==`、`!==`、`&=`、`!&=`、`|=` 和 `!|=`
+- `Upstream` 或 `DefaultUpstream` 为 `"drop"` 时丢弃数据包
+
+后端选择：
+
+- `Type: "rr"` 使用 Peer 的 `Weight` 进行加权轮询
+- `Type: "chash"` 根据 `KeyExtractor` 提取的 payload key 进行一致性哈希
+- `fixed` 支持 `"0:2,8:12"` 形式的多区间拼接和可选 `KeyMask`
+- `length_field` 支持从 payload 长度字段提取可变长 key
+- CHash key 无效时，`InvalidKeyPolicy` 可选择 `"drop"` 或回退到 `"rr"`
+
+## 典型应用场景
+
+以下示例只展示对应场景的关键配置，完整结构参考
+[示例配置](sd_config/config.example.json)。
+
+### 连接 ID 保持
+
+KCP 等协议会在 payload 的固定位置携带连接 ID。同一连接的数据包需要持续转发到同一
+后端时，可以提取该字段作为 CHash key。
+
+```text
+KCP payload
++---------------+---+---+-------+
+| conv (0:4)    |cmd|frg|  wnd  |
++---------------+---+---+-------+
+        |
+        +----------> CHash ----------> same Peer
+```
+
+```json
+{
+  "Name": "kcp",
   "Type": "chash",
   "KeyExtractor": {
-    "Type": "length_field",
-    "LengthField": {
-      "KeyStart": 4,
-      "LengthStart": 1,
-      "LengthBytes": 2,
-      "ByteOrder": "big",
-      "MaxKeyLength": 64
+    "Type": "fixed",
+    "Fixed": {
+      "KeyBytes": "0:4"
     }
   },
-  "InvalidKeyPolicy": "drop",
-  "HealthChecker": {
-    "HeartbeatIntervalSec": 5,
-    "HeartbeatTimeoutSec": 3,
-    "SuccessTimes": 1,
-    "FailedTimes": 1
-  },
-  "Peers": [
-    {
-      "IP": "10.0.0.1",
-      "Port": 2345,
-      "Weight": 1,
-      "Backup": true
-    },
-    {
-      "IP": "10.0.0.2",
-      "Port": 2345,
-      "Weight": 1,
-      "Backup": false
-    }
-  ]
+  "InvalidKeyPolicy": "drop"
 }
 ```
 
-`LengthBytes` 支持 1、2 或 4，`ByteOrder` 支持 `"big"` 和 `"little"`。
-长度字段缺失、key 为空、key 超过 `MaxKeyLength` 或 payload 无法容纳完整 key 时，
-按无效 key 处理。`KeyExtractor.Type` 必须与 `Fixed` 或 `LengthField` 配置匹配。
+如果 key 长度由报文字段决定，可以改用 `length_field`：
 
-### 协议版本兼容
-#### 场景说明
-当新旧版本协议无法由同一组服务完全兼容时，可以根据 payload 中的版本字段选择不同的
-上游。假设私有协议的报文结构如下：
-
-```
-0               4       6       8 (BYTE)
-+---------------+-------+-------+
-|     flag      |  ver  |  cmd  |
-+---------------+-------+-------+   8
-|            session id         |
-+---------------+---------------+  16
-|     len       |    checksum   |
-+---------------+---------------+  24
-|                               |
-|        DATA (optional)        |
-|                               |
-+-------------------------------+
+```json
+{
+  "Type": "length_field",
+  "LengthField": {
+    "KeyStart": 4,
+    "LengthStart": 1,
+    "LengthBytes": 2,
+    "ByteOrder": "big",
+    "MaxKeyLength": 64
+  }
+}
 ```
 
-`ver` 位于 `data[4:6]`，分别使用 `0x0001` 和 `0x0002` 表示两个协议版本。
+### 协议版本路由
 
-#### 转发效果
-版本 1 和版本 2 的数据包分别转发到 `ver1` 和 `ver2` 集群。其他版本及长度不足的报文
-不会命中路由，并由值为 `"drop"` 的默认 Upstream 目标丢弃。
+当不同协议版本由不同集群处理时，可以根据 payload 中的版本字段选择 Upstream。下面的
+规则将 `data[4:6]` 为 `0x0001` 和 `0x0002` 的流量分别转发到两个集群，其他版本丢弃。
 
-![](doc/media/example2-01.jpeg)
+```text
+                          +-- 0x0001 --> ver1
+UDP packet --> data[4:6] -+-- 0x0002 --> ver2
+                          +-- other  --> drop
+```
 
-#### 配置
-``` json
-"Upload": {
-  "DefaultUpstream": "drop",        // 未命中任何路由时丢弃
+```json
+{
+  "DefaultUpstream": "drop",
   "Routes": [
     {
       "Name": "protocol-v1",
       "Conditions": [
         {
-          "KeyBytes": "4:6",        // 当 data[4:6] == 0x0001 时
+          "KeyBytes": "4:6",
           "Operator": "==",
           "Value": "0x0001"
         }
@@ -284,268 +228,125 @@ key。以 KCP 为例，其报文结构如下：
       "Name": "protocol-v2",
       "Conditions": [
         {
-          "KeyBytes": "4:6",        // 当 data[4:6] == 0x0002 时
+          "KeyBytes": "4:6",
           "Operator": "==",
           "Value": "0x0002"
         }
       ],
       "Upstream": "ver2"
     }
-  ],
-  "Upstreams": [
-    {
-      "Name": "ver1",
-      "Type": "rr",
-      "HealthChecker": {
-        "HeartbeatIntervalSec": 5,
-        "HeartbeatTimeoutSec": 3,
-        "SuccessTimes": 1,
-        "FailedTimes": 1
-      },
-      "Peers": [
-        {
-          "IP": "10.0.0.1",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": true
-        },
-        ...
-      ]
-    },
-    {
-      "Name": "ver2",
-      "Type": "rr",
-      "HealthChecker": {
-        "HeartbeatIntervalSec": 5,
-        "HeartbeatTimeoutSec": 3,
-        "SuccessTimes": 1,
-        "FailedTimes": 1
-      },
-      "Peers": [
-        {
-          "IP": "10.0.1.1",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": true
-        },
-        ...
-      ]
-    }
   ]
 }
 ```
 
 ### 多字段业务分片
-#### 场景说明
-在物联网、游戏网关等场景中，业务分片可能同时依赖租户 ID 和设备 ID，而这两个字段
-并不一定连续。假设报文结构如下：
 
-```
-0       2   3   4               8              12 (BYTE)
-+-------+---+---+---------------+---------------+
-|tenant |flg|cmd|      seq      |   device id   |
-+-------+---+---+---------------+---------------+
-|                                               |
-|                DATA (optional)                |
-|                                               |
-+-----------------------------------------------+
+物联网或游戏网关可能需要同时使用租户 ID 和设备 ID 分片。字段不连续时，可以按配置
+顺序拼接多个字节区间作为 CHash key。
+
+```text
+payload
+  |
+  +-- data[0:2]  (tenant ID) --+
+  |                            +--> concatenate --> CHash --> Peer
+  +-- data[8:12] (device ID) --+
 ```
 
-`tenant` 位于 `data[0:2]`，`device id` 位于 `data[8:12]`。
-
-#### 转发效果
-`Fixed.KeyBytes` 按配置顺序拼接多个半开区间，本例使用
-`data[0:2] + data[8:12]` 作为 `chash` key。在可用 Peer 集合不变时，同一租户下的
-同一设备会稳定落到相同节点。该分片不依赖客户端源地址，因此客户端经过 NAT 或重新绑定
-端口后，业务归属仍保持不变。
-
-#### 配置
-``` json
-"Upload": {
-  "DefaultUpstream": "device",
-  "Upstreams": [
-    {
-      "Name": "device",
-      "Type": "chash",
-      "KeyExtractor": {
-        "Type": "fixed",
-        "Fixed": {
-          "KeyBytes": "0:2,8:12"     // tenant id + device id
-        }
-      },
-      "InvalidKeyPolicy": "drop",
-      "HealthChecker": {
-        "HeartbeatIntervalSec": 5,
-        "HeartbeatTimeoutSec": 3,
-        "SuccessTimes": 1,
-        "FailedTimes": 1
-      },
-      "Peers": [
-        {
-          "IP": "10.0.2.1",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": true
-        },
-        {
-          "IP": "10.0.2.2",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": false
-        },
-        {
-          "IP": "10.0.2.3",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": false
-        }
-      ]
+```json
+{
+  "Name": "device",
+  "Type": "chash",
+  "KeyExtractor": {
+    "Type": "fixed",
+    "Fixed": {
+      "KeyBytes": "0:2,8:12"
     }
-  ]
+  },
+  "InvalidKeyPolicy": "drop"
 }
 ```
 
-### 基于标志位的灰度发布
-#### 场景说明
-协议可以在标志字段中预留一个灰度位。假设 `flag` 位于 `data[2]`，并将其最高位定义为
-灰度标记：
+该分片不依赖客户端源地址，因此客户端经过 NAT 或更换源端口后，业务归属仍保持不变。
 
+### 标志位灰度发布
+
+协议预留灰度标志位时，可以通过按位条件将灰度流量路由到独立集群。下面的规则检查
+`data[2]` 的最高位，命中时转发到 `canary`，否则使用 `stable`。
+
+```text
+                         +-- (flag & 0x80) == 0x80 --> canary
+UDP packet --> data[2] --+
+                         +-- otherwise ------------> stable
 ```
-flag
-  7   6   5   4   3   2   1   0 (BIT)
-+---+---+---+---+---+---+---+---+
-| G |        other flags        |
-+---+---+---+---+---+---+---+---+
-```
 
-#### 转发效果
-当最高位为 1 时，`&=` 规则满足 `(data[2] & 0x80) == 0x80`，数据包会被转发到
-`canary` 集群。最高位为 0 或报文长度不足时，数据包不会命中灰度规则，并使用
-`DefaultUpstream` 指定的 `stable` 集群。
-
-灰度流量由客户端或业务网关显式标记，不依赖源 IP，也不需要调整监听端口。存在多条路由时，
-Stevedore 按配置顺序匹配，并使用首个命中的规则。
-
-#### 配置
-``` json
-"Upload": {
-  "DefaultUpstream": "stable",       // 未命中灰度规则时走稳定集群
+```json
+{
+  "DefaultUpstream": "stable",
   "Routes": [
     {
+      "Name": "canary",
       "Conditions": [
         {
-          "KeyBytes": "2:3",         // 提取 flag 字段
-          "Operator": "&=",          // (data[2] & 0x80) == 0x80
+          "KeyBytes": "2:3",
+          "Operator": "&=",
           "Value": "0x80"
         }
       ],
       "Upstream": "canary"
     }
-  ],
-  "Upstreams": [
-    {
-      "Name": "stable",
-      "Type": "rr",
-      "HealthChecker": {
-        "HeartbeatIntervalSec": 5,
-        "HeartbeatTimeoutSec": 3,
-        "SuccessTimes": 1,
-        "FailedTimes": 1
-      },
-      "Peers": [
-        {
-          "IP": "10.0.3.1",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": true
-        },
-        {
-          "IP": "10.0.3.2",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": false
-        }
-      ]
-    },
-    {
-      "Name": "canary",
-      "Type": "rr",
-      "HealthChecker": {
-        "HeartbeatIntervalSec": 5,
-        "HeartbeatTimeoutSec": 3,
-        "SuccessTimes": 1,
-        "FailedTimes": 1
-      },
-      "Peers": [
-        {
-          "IP": "10.0.4.1",
-          "Port": 2345,
-          "Weight": 1,
-          "Backup": true
-        }
-      ]
-    }
   ]
 }
 ```
 
-## 配置能力说明
+灰度标记由客户端或业务网关显式设置，不依赖源 IP，也不需要增加监听端口。
 
-payload 路由支持以下配置：
+## 健康检查
 
-- 每条路由必须配置非空 `Conditions` 数组，即使只有一个条件。
-- 多个 Conditions 按 AND 语义匹配，任一条件不满足时该路由不命中。
-- `Mask` 使用 `(payload & Mask) == Value` 语义，仅支持 `==` 和 `!==`。Mask、Value
-  和 `KeyBytes` 提取结果的长度必须一致，Value 不能包含 Mask 之外的置位。
-- `Name` 用于指标标识；省略时自动生成 `route-<index>`。路由名称不能重复。
-- `Upstream` 为空字符串或 `"drop"` 时丢弃；匹配已定义的 Upstream 名称时转发；
-  其他值会在启动时作为非法引用拒绝。
-- 未命中时使用 `DefaultUpstream`，其取值遵循与路由 `Upstream` 相同的语义。
-- 真实 Upstream 名称必须唯一，且不能使用空字符串或 `"drop"`。
+Stevedore 定期向每个 Peer 发送 UDP `heartbeat`。连续失败达到 `FailedTimes` 后将 Peer
+移出可选集合，连续成功达到 `SuccessTimes` 后重新加入。
 
-例如，以下规则要求魔数和带掩码的 flag 同时匹配：
+每个 Upstream 最多配置一个 `Backup: true` 的 Peer。它平时正常参与负载均衡；所有
+Peer 都不可用时，它将作为唯一兜底节点。未配置 Backup 时，无可用 Peer 的数据包会被丢弃。
 
-``` json
+## IPv6
+
+监听 IPv6 时，`Server.ListenAddr` 必须包含方括号：
+
+```json
 {
-  "Name": "canary-v1",
-  "Conditions": [
-    {
-      "KeyBytes": "0:2",
-      "Operator": "==",
-      "Value": "0x1234"
-    },
-    {
-      "KeyBytes": "2:3",
-      "Operator": "==",
-      "Value": "0x80",
-      "Mask": "0xc0"
-    }
-  ],
-  "Upstream": "canary"
+  "Server": {
+    "ListenAddr": "[::]:2614"
+  }
 }
 ```
 
-未知 Operator、非法字节区间、重复路由名称以及不存在的 Upstream 引用都会在
-启动时直接拒绝。`Log.UploadStatsIntervalSec` 大于 0 时，Server 按该秒数周期输出
-路由命中、默认命中、短报文、丢弃，以及各 Upstream 的路由、Peer 选择成功、选择失败
-和 Peer 故障累计数；值小于等于 0 时关闭统计，不累计热路径计数。路由匹配本身对所有
-Operator 均保持零堆分配。
+`Peer.IP` 只填写主机地址，例如 `"2001:db8::10"` 或 `"fe80::10%eth0"`。如需明确同时
+提供 IPv4、IPv6 入口，建议分别部署监听 `0.0.0.0:2614` 和 `[::]:2614` 的实例。
 
-`chash` 的 payload key 支持以下配置：
+## 运行管理
 
-- `KeyExtractor.Type: "fixed"`：通过 `Fixed.KeyBytes` 配置一个或多个半开字节区间，
-  多个区间使用逗号分隔并按配置顺序拼接。例如 `"0:2,4:6"` 提取
-  `data[0:2] + data[4:6]`。可选的 `Fixed.KeyMask` 与拼接后的 key 逐字节按位 AND，
-  长度必须与 key 相同。
-- `KeyExtractor.Type: "length_field"`：从 `LengthField.LengthStart` 读取长度，再从
-  `LengthField.KeyStart` 提取可变长 key。
-- `InvalidKeyPolicy`：payload 长度不足时的处理策略。空值或 `"drop"` 返回无可用 Peer
-  并最终丢弃数据包；协议提取失败也执行相同策略。`"rr"` 回退到同一 Upstream 的
-  加权轮询，但不再保证相同 key 落到同一节点。
+使用相同配置文件向运行中的进程发送信号：
 
-无效区间、负数索引、掩码格式或长度不匹配、未知 extractor 类型和未知策略都会在
-启动时直接拒绝。
+```bash
+# 重新加载 Upload 配置
+./stevedore -c stevedore.config.json -s reload
 
-每个 Upstream 最多有一个 Peer 可将 `Backup` 设为 `true`。该 Peer 健康时仍按其权重
-正常参与 RR/CHash；所有 Peer 都不可用时，无论其当时的健康状态如何，都会将它作为
-唯一 Peer 强制兜底。未配置 Backup 时，无可用 Peer 会直接丢包。
+# 优雅退出
+./stevedore -c stevedore.config.json -s stop
+./stevedore -c stevedore.config.json -s quit
+```
+
+`reload` 只允许 `Upload` 段发生变化。新配置校验或切换失败时，服务继续使用原配置；
+最终结果以运行进程日志中的 `reload config succeeded` 或 `reload config failed` 为准。
+
+Stevedore 默认以前台方式运行，并通过 `Common.PidPath` 持有 PID 文件锁。生产环境建议
+交由 systemd、Supervisor 或容器运行时管理，并为 `Common.PidPath` 配置绝对路径。
+
+## 平台差异
+
+| 平台 | 事件机制 | UDP 收发 | `ListenParallel` |
+| --- | --- | --- | --- |
+| Linux | `epoll` + `eventfd` | `recvmmsg` + `sendmmsg` | 支持 `SO_REUSEPORT` 分片 |
+| macOS | `kqueue` + `EVFILT_USER` | `recvfrom` + `sendmsg` | 固定为 1 |
+
+Linux 是生产性能目标。macOS 主要用于本地开发与功能验证。
