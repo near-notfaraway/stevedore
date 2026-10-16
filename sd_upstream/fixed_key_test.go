@@ -7,104 +7,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPayloadKeyExtractCombinesSegments(t *testing.T) {
-	key, err := newFixedKeyExtractor("0:2,4:6", "")
-	require.NoError(t, err)
-
-	got, ok := key.extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56, 0x78})
-
-	require.True(t, ok)
-	require.Equal(t, []byte{0x12, 0x34, 0x56, 0x78}, got)
-}
-
-func TestPayloadKeyExtractAppliesHexMask(t *testing.T) {
-	key, err := newFixedKeyExtractor("0:2,4:6", "0xff0f00f0")
-	require.NoError(t, err)
-
-	got, ok := key.extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56, 0x78})
-
-	require.True(t, ok)
-	require.Equal(t, []byte{0x12, 0x04, 0x00, 0x70}, got)
-}
-
-func TestPayloadKeyExtractAppliesBitMask(t *testing.T) {
-	key, err := newFixedKeyExtractor("0:1", "0b11110000")
-	require.NoError(t, err)
-
-	got, ok := key.extract([]byte{0xab})
-
-	require.True(t, ok)
-	require.Equal(t, []byte{0xa0}, got)
-}
-
-func TestPayloadKeyExtractRejectsShortPayload(t *testing.T) {
-	key, err := newFixedKeyExtractor("0:2,4:6", "")
-	require.NoError(t, err)
-
-	got, ok := key.extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56})
-
-	require.False(t, ok)
-	require.Nil(t, got)
-}
-
-func TestPayloadKeyExtractSingleSegmentWithoutCopy(t *testing.T) {
-	key, err := newFixedKeyExtractor("1:3", "")
-	require.NoError(t, err)
-	data := []byte{0x00, 0x12, 0x34, 0x00}
-
-	got, ok := key.extract(data)
-
-	require.True(t, ok)
-	require.Equal(t, []byte{0x12, 0x34}, got)
-	require.Same(t, &data[1], &got[0])
-}
-
-func TestNewPayloadKeyRejectsInvalidSegments(t *testing.T) {
-	tests := []string{
-		"",
-		"0",
-		"0:1:2",
-		"start:1",
-		"0:end",
-		"-1:1",
-		"1:1",
-		"2:1",
-		"0:1,",
-	}
-
-	for _, keyBytes := range tests {
-		t.Run(keyBytes, func(t *testing.T) {
-			_, err := newFixedKeyExtractor(keyBytes, "")
-			require.Error(t, err)
-		})
-	}
-}
-
-func TestNewPayloadKeyRejectsOversizedCombinedKey(t *testing.T) {
-	_, err := newFixedKeyExtractor("0:65536,0:1", "")
-
-	require.Error(t, err)
-}
-
-func TestNewPayloadKeyRejectsInvalidMask(t *testing.T) {
-	tests := []string{
-		"x",
-		"mask",
-		"0x0",
-		"0xffff",
-		"0b0000000x",
-	}
-
-	for _, mask := range tests {
-		t.Run(mask, func(t *testing.T) {
-			_, err := newFixedKeyExtractor("0:1", mask)
-			require.Error(t, err)
-		})
-	}
-}
-
 func TestNewFixedKeyExtractorConvey(t *testing.T) {
 	convey.Convey("Test newFixedKeyExtractor", t, func() {
+		convey.Convey("rejects invalid segments", func() {
+			tests := []string{
+				"",
+				"0",
+				"0:1:2",
+				"start:1",
+				"0:end",
+				"-1:1",
+				"1:1",
+				"2:1",
+				"0:1,",
+			}
+
+			for _, keyBytes := range tests {
+				t.Run(keyBytes, func(t *testing.T) {
+					_, err := newFixedKeyExtractor(keyBytes, "")
+					require.Error(t, err)
+				})
+			}
+		})
+		convey.Convey("rejects an oversized combined key", func() {
+			_, err := newFixedKeyExtractor("0:65536,0:1", "")
+
+			require.Error(t, err)
+		})
+		convey.Convey("rejects an invalid mask", func() {
+			tests := []string{
+				"x",
+				"mask",
+				"0x0",
+				"0xffff",
+				"0b0000000x",
+			}
+
+			for _, mask := range tests {
+				t.Run(mask, func(t *testing.T) {
+					_, err := newFixedKeyExtractor("0:1", mask)
+					require.Error(t, err)
+				})
+			}
+		})
 		convey.Convey("parses segments and masks", func() {
 			extractor, err := newFixedKeyExtractor("0:1,2:3", "0xffff")
 			convey.So(err, convey.ShouldBeNil)
@@ -116,6 +61,53 @@ func TestNewFixedKeyExtractorConvey(t *testing.T) {
 
 func TestFixedKeyExtractorExtractConvey(t *testing.T) {
 	convey.Convey("Test fixedKeyExtractor.extract", t, func() {
+		convey.Convey("combines segments", func() {
+			key, err := newFixedKeyExtractor("0:2,4:6", "")
+			require.NoError(t, err)
+
+			got, ok := key.extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56, 0x78})
+
+			require.True(t, ok)
+			require.Equal(t, []byte{0x12, 0x34, 0x56, 0x78}, got)
+		})
+		convey.Convey("applies a hex mask", func() {
+			key, err := newFixedKeyExtractor("0:2,4:6", "0xff0f00f0")
+			require.NoError(t, err)
+
+			got, ok := key.extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56, 0x78})
+
+			require.True(t, ok)
+			require.Equal(t, []byte{0x12, 0x04, 0x00, 0x70}, got)
+		})
+		convey.Convey("applies a bit mask", func() {
+			key, err := newFixedKeyExtractor("0:1", "0b11110000")
+			require.NoError(t, err)
+
+			got, ok := key.extract([]byte{0xab})
+
+			require.True(t, ok)
+			require.Equal(t, []byte{0xa0}, got)
+		})
+		convey.Convey("rejects short payloads", func() {
+			key, err := newFixedKeyExtractor("0:2,4:6", "")
+			require.NoError(t, err)
+
+			got, ok := key.extract([]byte{0x12, 0x34, 0xaa, 0xbb, 0x56})
+
+			require.False(t, ok)
+			require.Nil(t, got)
+		})
+		convey.Convey("returns a single segment without copying", func() {
+			key, err := newFixedKeyExtractor("1:3", "")
+			require.NoError(t, err)
+			data := []byte{0x00, 0x12, 0x34, 0x00}
+
+			got, ok := key.extract(data)
+
+			require.True(t, ok)
+			require.Equal(t, []byte{0x12, 0x34}, got)
+			require.Same(t, &data[1], &got[0])
+		})
 		convey.Convey("combines configured segments", func() {
 			extractor, _ := newFixedKeyExtractor("0:1,2:3", "")
 			got, ok := extractor.extract([]byte{1, 9, 2})

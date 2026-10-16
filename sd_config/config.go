@@ -2,11 +2,13 @@ package sd_config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 
 	"github.com/near-notfaraway/stevedore/sd_util"
+	"github.com/sirupsen/logrus"
 )
 
 type Config struct {
@@ -26,10 +28,63 @@ func Load(path string) (*Config, error) {
 	if config.Common == nil {
 		return nil, fmt.Errorf("common config is required")
 	}
-	if err := config.TestCommon(); err != nil {
-		return nil, fmt.Errorf("test common config: %w", err)
+	if err := config.applyCommonDefaults(); err != nil {
+		return nil, fmt.Errorf("apply common defaults: %w", err)
 	}
 	return config, nil
+}
+
+// ValidateConfig checks configuration structure and basic field constraints.
+func ValidateConfig(config *Config) error {
+	if config == nil {
+		return fmt.Errorf("config is required")
+	}
+	if config.Common == nil {
+		return fmt.Errorf("Common config is required")
+	}
+	if config.PProf == nil {
+		return fmt.Errorf("PProf config is required")
+	}
+	if config.Log == nil {
+		return fmt.Errorf("Log config is required")
+	}
+	if config.Server == nil {
+		return fmt.Errorf("Server config is required")
+	}
+	if config.Upload == nil {
+		return fmt.Errorf("Upload config is required")
+	}
+	if config.Session == nil {
+		return fmt.Errorf("Session config is required")
+	}
+
+	if _, err := logrus.ParseLevel(config.Log.Level); err != nil {
+		return fmt.Errorf("log level is invalid: %w", err)
+	}
+	if config.Log.Path == "" {
+		return fmt.Errorf("log path is required")
+	}
+	if config.Log.MaxAgeHour <= 0 {
+		return fmt.Errorf("log max age must be positive")
+	}
+	if config.Log.RotationTimeHour <= 0 {
+		return fmt.Errorf("log rotation time must be positive")
+	}
+	if config.PProf.Open {
+		if _, err := net.ResolveTCPAddr("tcp", config.PProf.ServerAddr); err != nil {
+			return fmt.Errorf("pprof server address is invalid: %w", err)
+		}
+	}
+	if config.Server.MaxTryTimes <= 0 {
+		return fmt.Errorf("server max try times must be positive")
+	}
+	if config.Session.RecycleIntervalSec <= 0 {
+		return fmt.Errorf("session recycle interval must be positive")
+	}
+	if config.Session.TimeoutSec < 0 {
+		return fmt.Errorf("session timeout must not be negative")
+	}
+	return nil
 }
 
 // ValidateUploadReload rejects changes outside the dynamically reloadable Upload section.
@@ -60,8 +115,8 @@ func ValidateUploadReload(current, next *Config) error {
 	return nil
 }
 
-// test common config before option handle finished
-func (c *Config) TestCommon() error {
+// applyCommonDefaults fills process-derived paths omitted from Common config.
+func (c *Config) applyCommonDefaults() error {
 	// use project dir for default
 	if c.Common.WorkingDir == "" {
 		execPath, err := filepath.Abs(os.Args[0])

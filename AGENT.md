@@ -116,8 +116,8 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
 
 ## 单元测试规范
 
-- 每个生产函数或方法必须有一个独立的 Go 测试函数，不得将多个生产函数的
-  测试集中到 `TestAll...` 等聚合测试中。
+- 每个生产函数或方法必须只有一个独立的 Go 测试函数，不得将多个生产函数的
+  测试集中到 `TestAll...` 等聚合测试中，也不将单个函数的测试拆分成多个测试函数。
 - 测试必须放在被测源文件对应的测试文件中：`xxx.go` 对应
   `xxx_test.go`，平台文件 `xxx_linux.go`、`xxx_darwin.go` 分别对应
   `xxx_linux_test.go`、`xxx_darwin_test.go`。

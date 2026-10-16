@@ -27,9 +27,9 @@ const (
 )
 
 type reactorCommand struct {
-	uploadManager *uploadManager
-	done          chan struct{}
-	state         atomic.Uint32
+	uploadMgr *uploadManager
+	done      chan struct{}
+	state     atomic.Uint32
 }
 
 type reactor struct {
@@ -40,9 +40,9 @@ type reactor struct {
 	sessions       map[sd_socket.SockaddrKey]*sd_session.Session // downstream key to session
 	sessionsByFD   map[int]*sd_session.Session                   // upstream fd to session
 	sessionWheel   *sd_session.Wheel                             // reactor-local idle session time wheel
-	upstreamMgr    *uploadManager                                // reactor-local upstream selectors and shared routes
-	rxMC           *sd_socket.MMsgContainer                      // reactor-local shared batch receive buffers
-	txMC           *sd_socket.SendMMsgContainer                  // reactor-local zero-copy batch send descriptors
+	uploadMgr      *uploadManager                                // reactor-local routing and upstream selection state
+	rxContainer    *sd_socket.MMsgContainer                      // reactor-local shared batch receive buffers
+	txContainer    *sd_socket.SendMMsgContainer                  // reactor-local zero-copy batch send descriptors
 	readyFDs       []int                                         // reactor-local round-robin ready queue
 	readySet       map[int]struct{}                              // prevents duplicate fds in readyFDs
 	recvBatchLimit int                                           // maximum recvmmsg calls per fd per round
@@ -52,7 +52,8 @@ type reactor struct {
 }
 
 // newReactor creates one isolated network shard and all resources it owns.
-func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstreamMgr *uploadManager) (*reactor, error) {
+func newReactor(id int, config *sd_config.Config, listenSockaddr unix.Sockaddr,
+	uploadMgr *uploadManager) (*reactor, error) {
 	eventSize := config.Server.EventSize
 	if eventSize < 1 {
 		eventSize = sd_socket.DefaultEventSize
@@ -62,7 +63,7 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 		return nil, fmt.Errorf("create selector: %w", err)
 	}
 
-	listenFD, err := sd_socket.UDPBoundSocket(listenSa, true, true, true)
+	listenFD, err := sd_socket.UDPBoundSocket(listenSockaddr, true, true, true)
 	if err != nil {
 		_ = selector.Close()
 		return nil, fmt.Errorf("create listen socket: %w", err)
@@ -90,9 +91,9 @@ func newReactor(id int, config *sd_config.Config, listenSa unix.Sockaddr, upstre
 		sessions:       make(map[sd_socket.SockaddrKey]*sd_session.Session),
 		sessionsByFD:   make(map[int]*sd_session.Session),
 		sessionWheel:   sd_session.NewWheel(recycleInterval, config.Session.TimeoutSec, 0),
-		upstreamMgr:    upstreamMgr,
-		rxMC:           sd_socket.NewMMsgContainer(config.Server.BatchSize, config.Server.BufSize),
-		txMC:           sd_socket.NewSendMMsgContainer(config.Server.BatchSize),
+		uploadMgr:      uploadMgr,
+		rxContainer:    sd_socket.NewMMsgContainer(config.Server.BatchSize, config.Server.BufSize),
+		txContainer:    sd_socket.NewSendMMsgContainer(config.Server.BatchSize),
 		readyFDs:       make([]int, 0, eventSize),
 		readySet:       make(map[int]struct{}),
 		recvBatchLimit: recvBatchLimit,
@@ -120,14 +121,14 @@ func (r *reactor) serve(ctx context.Context) error {
 }
 
 // updateUploadManager queues a manager replacement and waits for reactor acknowledgment.
-func (r *reactor) updateUploadManager(ctx context.Context, manager *uploadManager) error {
-	if manager == nil {
+func (r *reactor) updateUploadManager(ctx context.Context, uploadMgr *uploadManager) error {
+	if uploadMgr == nil {
 		return fmt.Errorf("upload manager is required")
 	}
 
 	command := &reactorCommand{
-		uploadManager: manager,
-		done:          make(chan struct{}),
+		uploadMgr: uploadMgr,
+		done:      make(chan struct{}),
 	}
 	select {
 	case r.commandCh <- command:
@@ -160,7 +161,7 @@ func (r *reactor) processCommands() {
 		select {
 		case command := <-r.commandCh:
 			if command.state.CompareAndSwap(reactorCommandPending, reactorCommandApplied) {
-				r.upstreamMgr = command.uploadManager
+				r.uploadMgr = command.uploadMgr
 			}
 			close(command.done)
 		default:
@@ -213,10 +214,10 @@ func (r *reactor) processReady() {
 }
 
 func (r *reactor) handleUpload() bool {
-	r.rxMC.ResetNameLengths()
+	r.rxContainer.ResetNameLengths()
 	for batch := 0; batch < r.recvBatchLimit; batch++ {
-		nPkt, errno := sd_socket.RecvMMsg(r.listenFD, r.rxMC)
-		if nPkt < 1 || errno != 0 {
+		packetCount, errno := sd_socket.RecvMMsg(r.listenFD, r.rxContainer)
+		if packetCount < 1 || errno != 0 {
 			if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
 				r.logger.Errorf("receive upload packets failed: %s", os.NewSyscallError("recvmmsg", errno))
 			}
@@ -224,7 +225,7 @@ func (r *reactor) handleUpload() bool {
 		}
 
 		now := r.nowSec()
-		for i := 0; i < nPkt; i++ {
+		for i := 0; i < packetCount; i++ {
 			r.handleUploadPacket(i, now)
 		}
 	}
@@ -233,9 +234,9 @@ func (r *reactor) handleUpload() bool {
 
 // handleUploadPacket routes one downstream packet and retries eligible upstream peers.
 func (r *reactor) handleUploadPacket(index int, now int64) {
-	nr := r.rxMC.GetLengthOfMsg(index)
-	buf := r.rxMC.GetBufOfMsg(index)[:nr]
-	key := r.rxMC.GetRSockaddrKeyOfMsg(index)
+	messageLength := r.rxContainer.GetLengthOfMsg(index)
+	buf := r.rxContainer.GetBufOfMsg(index)[:messageLength]
+	key := r.rxContainer.GetRSockaddrKeyOfMsg(index)
 
 	sess := r.sessions[key]
 	if sess == nil {
@@ -248,14 +249,14 @@ func (r *reactor) handleUploadPacket(index int, now int64) {
 		r.logger.Debugf("upload packet: data=%v", buf)
 	}
 
-	upstreamName := r.upstreamMgr.routeUpstream(buf)
+	upstreamName := r.uploadMgr.routeUpstream(buf)
 	if upstreamName == "" {
 		r.logger.Info("can not route upstream")
 		return
 	}
 
 	for try := 0; try < r.config.Server.MaxTryTimes; try++ {
-		peer, ok := r.upstreamMgr.selectPeer(upstreamName, buf)
+		peer, ok := r.uploadMgr.selectPeer(upstreamName, buf)
 		if !ok {
 			r.logger.Infof("upstream %s does not exist", upstreamName)
 			return
@@ -275,7 +276,7 @@ func (r *reactor) handleUploadPacket(index int, now int64) {
 		}
 		r.logger.Warnf("upload to peer %s failed: %v", peer.GetAddr(), err)
 		if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
-			r.upstreamMgr.markPeerDead(upstreamName, peer)
+			r.uploadMgr.markPeerDead(upstreamName, peer)
 		}
 	}
 	r.logger.Error("upload packet failed, drop it")
@@ -310,8 +311,8 @@ func (r *reactor) getOrCreateSessionFD(sess *sd_session.Session, family int) (in
 // handleDownload batches upstream responses and forwards them to the downstream session.
 func (r *reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 	for batch := 0; batch < r.recvBatchLimit; batch++ {
-		nPkt, errno := sd_socket.RecvMMsg(fd, r.rxMC)
-		if nPkt < 1 || errno != 0 {
+		packetCount, errno := sd_socket.RecvMMsg(fd, r.rxContainer)
+		if packetCount < 1 || errno != 0 {
 			if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
 				r.logger.Errorf("receive download packets failed: %s", os.NewSyscallError("recvmmsg", errno))
 				r.removeSession(sess)
@@ -321,12 +322,12 @@ func (r *reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 
 		r.sessionWheel.Touch(sess, r.nowSec())
 		key := sess.GetKey()
-		for i := 0; i < nPkt; i++ {
-			nr := r.rxMC.GetLengthOfMsg(i)
-			buf := r.rxMC.GetBufOfMsg(i)[:nr]
-			r.txMC.Prepare(i, buf, key)
+		for i := 0; i < packetCount; i++ {
+			messageLength := r.rxContainer.GetLengthOfMsg(i)
+			buf := r.rxContainer.GetBufOfMsg(i)[:messageLength]
+			r.txContainer.Prepare(i, buf, key)
 		}
-		if err := r.sendDownloadBatch(nPkt); err != nil {
+		if err := r.sendDownloadBatch(packetCount); err != nil {
 			r.logger.Errorf("send packets to downstream failed: %v", err)
 		}
 	}
@@ -336,18 +337,18 @@ func (r *reactor) handleDownload(fd int, sess *sd_session.Session) bool {
 func (r *reactor) sendDownloadBatch(packetCount int) error {
 	sent := 0
 	for sent < packetCount {
-		n, err := sd_socket.SendMMsg(r.listenFD, r.txMC, sent, packetCount)
-		sent += n
+		sentCount, err := sd_socket.SendMMsg(r.listenFD, r.txContainer, sent, packetCount)
+		sent += sentCount
 		if err != nil {
 			var firstErr error
 			for i := sent; i < packetCount; i++ {
-				if sendErr := sd_socket.SendMsg(r.listenFD, r.txMC, i); sendErr != nil && firstErr == nil {
+				if sendErr := sd_socket.SendMsg(r.listenFD, r.txContainer, i); sendErr != nil && firstErr == nil {
 					firstErr = sendErr
 				}
 			}
 			return firstErr
 		}
-		if n < 1 {
+		if sentCount < 1 {
 			return fmt.Errorf("sendmmsg sent no packets")
 		}
 	}

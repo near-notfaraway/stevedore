@@ -51,7 +51,10 @@ func runOption(option *sd_config.Option) error {
 
 	switch action {
 	case sd_config.ActionTest:
-		if err := sd_server.ValidateConfig(config); err != nil {
+		if err := sd_config.ValidateConfig(config); err != nil {
+			return fmt.Errorf("test config: %w", err)
+		}
+		if err := sd_server.ValidateRuntimeConfig(config); err != nil {
 			return fmt.Errorf("test config: %w", err)
 		}
 		fmt.Println("test config succeeded")
@@ -64,7 +67,10 @@ func runOption(option *sd_config.Option) error {
 		fmt.Printf("signal %s sent to stevedore[%d]\n", option.Signal, pid)
 		return nil
 	case sd_config.ActionRun:
-		if err := sd_server.ValidateConfig(config); err != nil {
+		if err := sd_config.ValidateConfig(config); err != nil {
+			return fmt.Errorf("test config: %w", err)
+		}
+		if err := sd_server.ValidateRuntimeConfig(config); err != nil {
 			return fmt.Errorf("test config: %w", err)
 		}
 		return runServer(configPath, config)

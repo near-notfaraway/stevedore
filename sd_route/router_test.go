@@ -22,237 +22,6 @@ func mustNewRouter(
 	return router
 }
 
-func TestRouterStatsCountNamedRouteMatches(t *testing.T) {
-	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Name: "canary",
-			Conditions: []sd_config.RouteConditionConfig{
-				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-			},
-			Upstream: "target",
-		},
-	}, true)
-
-	router.Route([]byte{0x01})
-	router.Route([]byte{0x01})
-
-	require.Equal(t, []RouteStats{
-		{ID: 0, Name: "canary", Matches: 2},
-	}, router.Stats().Routes)
-}
-
-func TestRouterStatsDisabledByDefault(t *testing.T) {
-	router := mustNewRouter(t, DropUpstream, nil, false)
-
-	router.Route(nil)
-
-	stats := router.Stats()
-	require.Zero(t, stats.DefaultRoutes)
-	require.Zero(t, stats.ShortPayloads)
-	require.Zero(t, stats.Drops)
-}
-
-func TestRouterStatsGenerateNameForLegacyRoute(t *testing.T) {
-	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Conditions: []sd_config.RouteConditionConfig{
-				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-			},
-			Upstream: "target",
-		},
-	}, false)
-
-	require.Equal(t, "route-0", router.Stats().Routes[0].Name)
-}
-
-func TestRouterCloneSharesRulesAndKeepsIndependentStats(t *testing.T) {
-	template := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Name: "canary",
-			Conditions: []sd_config.RouteConditionConfig{
-				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-			},
-			Upstream: "target",
-		},
-	}, true)
-	first := template.Clone()
-	second := template.Clone()
-	require.Same(t, template.routes[0], first.routes[0])
-	require.Same(t, template.routes[0], second.routes[0])
-
-	require.Equal(t, "target", first.Route([]byte{0x01}))
-	require.Equal(t, "default", second.Route([]byte{0x02}))
-
-	require.Equal(t, uint64(1), first.Stats().Routes[0].Matches)
-	require.Zero(t, first.Stats().DefaultRoutes)
-	require.Zero(t, second.Stats().Routes[0].Matches)
-	require.Equal(t, uint64(1), second.Stats().DefaultRoutes)
-	require.Zero(t, template.Stats().Routes[0].Matches)
-	require.Zero(t, template.Stats().DefaultRoutes)
-}
-
-func TestRouterCloneKeepsStatsDisabled(t *testing.T) {
-	template := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Conditions: []sd_config.RouteConditionConfig{
-				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-			},
-			Upstream: "target",
-		},
-	}, false)
-	clone := template.Clone()
-
-	require.Equal(t, "target", clone.Route([]byte{0x01}))
-	require.Equal(t, "default", clone.Route([]byte{0x02}))
-	require.Zero(t, clone.Stats().Routes[0].Matches)
-	require.Zero(t, clone.Stats().DefaultRoutes)
-}
-
-func TestRouterStatsConcurrentWithRouting(t *testing.T) {
-	const matches = 1000
-
-	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Conditions: []sd_config.RouteConditionConfig{
-				{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-			},
-			Upstream: "target",
-		},
-	}, true)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for range matches {
-			router.Route([]byte{0x01})
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for range matches {
-			router.Stats()
-		}
-	}()
-	wg.Wait()
-
-	require.Equal(t, uint64(matches), router.Stats().Routes[0].Matches)
-}
-
-func TestNewRouterRejectsDuplicateRouteNames(t *testing.T) {
-	router, err := NewRouter("default", []sd_config.RouteConfig{
-		{
-			Name:       "duplicate",
-			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-			Upstream:   "first",
-		},
-		{
-			Name:       "duplicate",
-			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x02"}},
-			Upstream:   "second",
-		},
-	}, false)
-
-	require.Nil(t, router)
-	require.EqualError(t, err, `route name "duplicate" is duplicated`)
-}
-
-func TestRouterStatsCountDefaultRoutesAndShortPayloads(t *testing.T) {
-	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Conditions: []sd_config.RouteConditionConfig{
-				{KeyBytes: "1:2", Operator: "==", Value: "0x01"},
-			},
-			Upstream: "target",
-		},
-	}, true)
-
-	router.Route([]byte{0x00, 0x02})
-	router.Route([]byte{0x00})
-
-	stats := router.Stats()
-	require.Equal(t, uint64(2), stats.DefaultRoutes)
-	require.Equal(t, uint64(1), stats.ShortPayloads)
-}
-
-func TestRouterStatsCountExplicitDrops(t *testing.T) {
-	for _, target := range []string{"", DropUpstream} {
-		router := mustNewRouter(t, target, []sd_config.RouteConfig{
-			{
-				Name: "blocked",
-				Conditions: []sd_config.RouteConditionConfig{
-					{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-				},
-				Upstream: target,
-			},
-		}, true)
-
-		require.Empty(t, router.Route([]byte{0x01}))
-		require.Empty(t, router.Route([]byte{0x02}))
-
-		stats := router.Stats()
-		require.Equal(t, uint64(2), stats.Drops)
-		require.Equal(t, uint64(1), stats.Routes[0].Matches)
-		require.Equal(t, uint64(1), stats.DefaultRoutes)
-	}
-}
-
-func TestRouterUsesFirstMatchingRoute(t *testing.T) {
-	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-			Upstream:   "first",
-		},
-		{
-			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-			Upstream:   "second",
-		},
-	}, false)
-
-	require.Equal(t, "first", router.Route([]byte{0x01}))
-}
-
-func TestRouterUsesDefaultWithoutMatch(t *testing.T) {
-	router := mustNewRouter(t, "default", []sd_config.RouteConfig{
-		{
-			Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
-			Upstream:   "target",
-		},
-	}, false)
-
-	require.Equal(t, "default", router.Route([]byte{0x02}))
-	require.Equal(t, "default", router.Route(nil))
-}
-
-func TestRouterRequiresAllConditionsToMatch(t *testing.T) {
-	var router *Router
-	require.NotPanics(t, func() {
-		router = mustNewRouter(t, "default", []sd_config.RouteConfig{
-			{
-				Conditions: []sd_config.RouteConditionConfig{
-					{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
-					{KeyBytes: "1:2", Operator: "==", Value: "0x02"},
-				},
-				Upstream: "target",
-			},
-		}, false)
-	})
-
-	require.Equal(t, "target", router.Route([]byte{0x01, 0x02}))
-	require.Equal(t, "default", router.Route([]byte{0x01, 0x03}))
-	require.Equal(t, "default", router.Route([]byte{0x01}))
-}
-
-func TestNewRouterRejectsRouteWithoutConditions(t *testing.T) {
-	router, err := NewRouter("default", []sd_config.RouteConfig{
-		{
-			Upstream: "target",
-		},
-	}, false)
-
-	require.Nil(t, router)
-	require.EqualError(t, err, "conditions are required in route 0")
-}
-
 func TestNewRouterConvey(t *testing.T) {
 	convey.Convey("Test NewRouter", t, func() {
 		config := sd_config.RouteConfig{
@@ -268,6 +37,101 @@ func TestNewRouterConvey(t *testing.T) {
 			router := mustNewRouter(t, DropUpstream, []sd_config.RouteConfig{config}, false)
 			convey.So(router.defaultUpstream, convey.ShouldBeEmpty)
 			convey.So(router.routes, convey.ShouldHaveLength, 1)
+		})
+		convey.Convey("rejects duplicate route names", func() {
+			router, err := NewRouter("default", []sd_config.RouteConfig{
+				{
+					Name:       "duplicate",
+					Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
+					Upstream:   "first",
+				},
+				{
+					Name:       "duplicate",
+					Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x02"}},
+					Upstream:   "second",
+				},
+			}, false)
+
+			require.Nil(t, router)
+			require.EqualError(t, err, `route name "duplicate" is duplicated`)
+		})
+		convey.Convey("rejects routes without conditions", func() {
+			router, err := NewRouter("default", []sd_config.RouteConfig{
+				{
+					Upstream: "target",
+				},
+			}, false)
+
+			require.Nil(t, router)
+			require.EqualError(t, err, "conditions are required in route 0")
+		})
+		convey.Convey("rejects invalid operators", func() {
+			router, err := NewRouter("default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "invalid", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, false)
+
+			require.Nil(t, router)
+			require.Error(t, err)
+		})
+		convey.Convey("rejects malformed key byte ranges", func() {
+			for _, keyBytes := range []string{"0", "0:1:2"} {
+				router, err := NewRouter("default", []sd_config.RouteConfig{
+					{
+						Conditions: []sd_config.RouteConditionConfig{
+							{KeyBytes: keyBytes, Operator: "==", Value: "0x01"},
+						},
+						Upstream: "target",
+					},
+				}, false)
+
+				require.Nil(t, router)
+				require.Error(t, err)
+			}
+		})
+		convey.Convey("rejects invalid mask semantics", func() {
+			tests := []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "&=", Value: "0x80", Mask: "0xc0"},
+					},
+					Upstream: "target",
+				},
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0xc0", Mask: "0x80"},
+					},
+					Upstream: "target",
+				},
+			}
+
+			for _, config := range tests {
+				router, err := NewRouter("default", []sd_config.RouteConfig{config}, false)
+
+				require.Nil(t, router)
+				require.Error(t, err)
+			}
+		})
+		convey.Convey("rejects invalid condition configs", func() {
+			tests := []sd_config.RouteConfig{
+				{Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "start:1", Operator: "==", Value: "0x01"}}},
+				{Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:end", Operator: "==", Value: "0x01"}}},
+				{Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "1:1", Operator: "==", Value: ""}}},
+				{Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "invalid"}}},
+				{Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:2", Operator: "==", Value: "0x01"}}},
+				{Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "-1:1", Operator: "==", Value: "0x0001"}}},
+			}
+
+			for _, config := range tests {
+				router, err := NewRouter("", []sd_config.RouteConfig{config}, false)
+
+				require.Nil(t, router)
+				require.Error(t, err)
+			}
 		})
 	})
 }
@@ -291,6 +155,47 @@ func TestRouterCloneConvey(t *testing.T) {
 			convey.So(clone.Stats().Routes[0].Matches, convey.ShouldEqual, 1)
 			convey.So(router.Stats().Routes[0].Matches, convey.ShouldEqual, 0)
 		})
+		convey.Convey("shares rules while keeping independent stats", func() {
+			template := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Name: "canary",
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, true)
+			first := template.Clone()
+			second := template.Clone()
+			require.Same(t, template.routes[0], first.routes[0])
+			require.Same(t, template.routes[0], second.routes[0])
+
+			require.Equal(t, "target", first.Route([]byte{0x01}))
+			require.Equal(t, "default", second.Route([]byte{0x02}))
+
+			require.Equal(t, uint64(1), first.Stats().Routes[0].Matches)
+			require.Zero(t, first.Stats().DefaultRoutes)
+			require.Zero(t, second.Stats().Routes[0].Matches)
+			require.Equal(t, uint64(1), second.Stats().DefaultRoutes)
+			require.Zero(t, template.Stats().Routes[0].Matches)
+			require.Zero(t, template.Stats().DefaultRoutes)
+		})
+		convey.Convey("keeps stats disabled", func() {
+			template := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, false)
+			clone := template.Clone()
+
+			require.Equal(t, "target", clone.Route([]byte{0x01}))
+			require.Equal(t, "default", clone.Route([]byte{0x02}))
+			require.Zero(t, clone.Stats().Routes[0].Matches)
+			require.Zero(t, clone.Stats().DefaultRoutes)
+		})
 	})
 }
 
@@ -312,6 +217,113 @@ func TestRouterStatsConvey(t *testing.T) {
 			convey.So(stats.Routes[0].Name, convey.ShouldEqual, "matched")
 			convey.So(stats.Routes[0].Matches, convey.ShouldEqual, 2)
 		})
+		convey.Convey("counts named route matches", func() {
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Name: "canary",
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, true)
+
+			router.Route([]byte{0x01})
+			router.Route([]byte{0x01})
+
+			require.Equal(t, []RouteStats{
+				{ID: 0, Name: "canary", Matches: 2},
+			}, router.Stats().Routes)
+		})
+		convey.Convey("stays disabled by default", func() {
+			router := mustNewRouter(t, DropUpstream, nil, false)
+
+			router.Route(nil)
+
+			stats := router.Stats()
+			require.Zero(t, stats.DefaultRoutes)
+			require.Zero(t, stats.ShortPayloads)
+			require.Zero(t, stats.Drops)
+		})
+		convey.Convey("generates names for unnamed routes", func() {
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, false)
+
+			require.Equal(t, "route-0", router.Stats().Routes[0].Name)
+		})
+		convey.Convey("supports concurrent routing and snapshots", func() {
+			const matches = 1000
+
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, true)
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				for range matches {
+					router.Route([]byte{0x01})
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				for range matches {
+					router.Stats()
+				}
+			}()
+			wg.Wait()
+
+			require.Equal(t, uint64(matches), router.Stats().Routes[0].Matches)
+		})
+		convey.Convey("counts default routes and short payloads", func() {
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "1:2", Operator: "==", Value: "0x01"},
+					},
+					Upstream: "target",
+				},
+			}, true)
+
+			router.Route([]byte{0x00, 0x02})
+			router.Route([]byte{0x00})
+
+			stats := router.Stats()
+			require.Equal(t, uint64(2), stats.DefaultRoutes)
+			require.Equal(t, uint64(1), stats.ShortPayloads)
+		})
+		convey.Convey("counts explicit drops", func() {
+			for _, target := range []string{"", DropUpstream} {
+				router := mustNewRouter(t, target, []sd_config.RouteConfig{
+					{
+						Name: "blocked",
+						Conditions: []sd_config.RouteConditionConfig{
+							{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+						},
+						Upstream: target,
+					},
+				}, true)
+
+				require.Empty(t, router.Route([]byte{0x01}))
+				require.Empty(t, router.Route([]byte{0x02}))
+
+				stats := router.Stats()
+				require.Equal(t, uint64(2), stats.Drops)
+				require.Equal(t, uint64(1), stats.Routes[0].Matches)
+				require.Equal(t, uint64(1), stats.DefaultRoutes)
+			}
+		})
 	})
 }
 
@@ -330,6 +342,106 @@ func TestRouterRouteConvey(t *testing.T) {
 			router := mustNewRouter(t, "default", []sd_config.RouteConfig{config}, false)
 			convey.So(router.Route([]byte{1}), convey.ShouldEqual, "target")
 			convey.So(router.Route([]byte{2}), convey.ShouldEqual, "default")
+		})
+		convey.Convey("uses the first matching route", func() {
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
+					Upstream:   "first",
+				},
+				{
+					Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
+					Upstream:   "second",
+				},
+			}, false)
+
+			require.Equal(t, "first", router.Route([]byte{0x01}))
+		})
+		convey.Convey("uses the default when no route matches", func() {
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{{KeyBytes: "0:1", Operator: "==", Value: "0x01"}},
+					Upstream:   "target",
+				},
+			}, false)
+
+			require.Equal(t, "default", router.Route([]byte{0x02}))
+			require.Equal(t, "default", router.Route(nil))
+		})
+		convey.Convey("requires every condition to match", func() {
+			var router *Router
+			require.NotPanics(t, func() {
+				router = mustNewRouter(t, "default", []sd_config.RouteConfig{
+					{
+						Conditions: []sd_config.RouteConditionConfig{
+							{KeyBytes: "0:1", Operator: "==", Value: "0x01"},
+							{KeyBytes: "1:2", Operator: "==", Value: "0x02"},
+						},
+						Upstream: "target",
+					},
+				}, false)
+			})
+
+			require.Equal(t, "target", router.Route([]byte{0x01, 0x02}))
+			require.Equal(t, "default", router.Route([]byte{0x01, 0x03}))
+			require.Equal(t, "default", router.Route([]byte{0x01}))
+		})
+		convey.Convey("matches masked values", func() {
+			router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+				{
+					Conditions: []sd_config.RouteConditionConfig{
+						{KeyBytes: "0:1", Operator: "==", Value: "0x80", Mask: "0xc0"},
+					},
+					Upstream: "target",
+				},
+			}, false)
+
+			require.Equal(t, "target", router.Route([]byte{0x8f}))
+			require.Equal(t, "default", router.Route([]byte{0xcf}))
+		})
+		convey.Convey("does not allocate", func() {
+			tests := []struct {
+				name     string
+				operator string
+				value    string
+				mask     string
+				data     byte
+			}{
+				{name: "equal", operator: "==", value: "0x03", data: 0x03},
+				{name: "not equal", operator: "!==", value: "0x02", data: 0x03},
+				{name: "or equal", operator: "|=", value: "0x03", data: 0x03},
+				{name: "or not equal", operator: "!|=", value: "0x03", data: 0x04},
+				{name: "and equal", operator: "&=", value: "0x01", data: 0x03},
+				{name: "and not equal", operator: "!&=", value: "0x01", data: 0x02},
+				{name: "masked equal", operator: "==", value: "0x80", mask: "0xc0", data: 0x8f},
+			}
+
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					router := mustNewRouter(t, "default", []sd_config.RouteConfig{
+						{
+							Conditions: []sd_config.RouteConditionConfig{
+								{
+									KeyBytes: "0:1",
+									Operator: test.operator,
+									Value:    test.value,
+									Mask:     test.mask,
+								},
+							},
+							Upstream: "target",
+						},
+					}, false)
+					data := []byte{test.data}
+					var upstream string
+
+					allocs := testing.AllocsPerRun(1000, func() {
+						upstream = router.Route(data)
+					})
+
+					require.Zero(t, allocs)
+					require.Equal(t, "target", upstream)
+				})
+			}
 		})
 	})
 }

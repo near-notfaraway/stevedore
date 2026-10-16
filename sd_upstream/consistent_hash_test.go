@@ -10,105 +10,6 @@ import (
 
 const maxConsistentHashMigrationRatio = 0.16
 
-func TestConsistentHashEmptyPeers(t *testing.T) {
-	hash := newConsistentHash(nil)
-
-	require.Nil(t, hash.selectPeer([]byte("key")))
-	require.ErrorIs(t, hash.updateLookupTable(nil), noPeerError)
-	require.Nil(t, hash.lookupTable)
-}
-
-func TestConsistentHashSinglePeerOwnsEntireTable(t *testing.T) {
-	peer := testPeer("127.0.0.1:10001", 1)
-	hash := newConsistentHash([]*Peer{peer})
-
-	require.Len(t, hash.lookupTable, lookupTableSize)
-	for _, selected := range hash.lookupTable {
-		require.Same(t, peer, selected)
-	}
-	require.Same(t, peer, hash.selectPeer([]byte("first-key")))
-	require.Same(t, peer, hash.selectPeer([]byte("second-key")))
-}
-
-func TestConsistentHashBuildIsDeterministic(t *testing.T) {
-	peers := []*Peer{
-		testPeer("127.0.0.1:10001", 2),
-		testPeer("127.0.0.1:10002", 1),
-		testPeer("127.0.0.1:10003", 1),
-	}
-
-	first := newConsistentHash(peers)
-	second := newConsistentHash(peers)
-
-	require.Equal(t, first.lookupTable, second.lookupTable)
-	for _, key := range [][]byte{
-		[]byte("connection-1"),
-		[]byte("connection-2"),
-		{0x00, 0x01, 0x02, 0x03},
-	} {
-		require.Same(t, first.selectPeer(key), second.selectPeer(key))
-	}
-}
-
-func TestConsistentHashDistributesTableByWeight(t *testing.T) {
-	first := testPeer("127.0.0.1:10001", 3)
-	second := testPeer("127.0.0.1:10002", 1)
-	hash := newConsistentHash([]*Peer{first, second})
-
-	firstSlots := countPeer(hash.lookupTable, first)
-	secondSlots := countPeer(hash.lookupTable, second)
-
-	require.Len(t, hash.lookupTable, lookupTableSize)
-	require.InDelta(t, float64(lookupTableSize)*0.75, firstSlots, 1)
-	require.InDelta(t, float64(lookupTableSize)*0.25, secondSlots, 1)
-	require.Equal(t, lookupTableSize, firstSlots+secondSlots)
-}
-
-func TestConsistentHashUpdateReplacesPreviousPeers(t *testing.T) {
-	first := testPeer("127.0.0.1:10001", 1)
-	second := testPeer("127.0.0.1:10002", 1)
-	hash := newConsistentHash([]*Peer{first})
-
-	require.NoError(t, hash.updateLookupTable([]*Peer{second}))
-
-	require.NotContains(t, hash.lookupTable, first)
-	require.Same(t, second, hash.selectPeer([]byte("key")))
-}
-
-func TestConsistentHashEmptyUpdateClearsPreviousTable(t *testing.T) {
-	hash := newConsistentHash([]*Peer{
-		testPeer("127.0.0.1:10001", 1),
-	})
-
-	require.ErrorIs(t, hash.updateLookupTable(nil), noPeerError)
-	require.Nil(t, hash.lookupTable)
-	require.Nil(t, hash.selectPeer([]byte("key")))
-}
-
-func TestConsistentHashLimitsMigrationWhenPeerAdded(t *testing.T) {
-	peers := makeEqualWeightPeers(8)
-	before := newConsistentHash(peers)
-	after := newConsistentHash(append(peers, testPeer("10.0.0.9:2345", 1)))
-
-	require.LessOrEqual(
-		t,
-		float64(countMigratedSlots(before, after))/float64(lookupTableSize),
-		maxConsistentHashMigrationRatio,
-	)
-}
-
-func TestConsistentHashLimitsMigrationWhenPeerRemoved(t *testing.T) {
-	peers := makeEqualWeightPeers(8)
-	before := newConsistentHash(peers)
-	after := newConsistentHash(peers[:len(peers)-1])
-
-	require.LessOrEqual(
-		t,
-		float64(countMigratedSlots(before, after))/float64(lookupTableSize),
-		maxConsistentHashMigrationRatio,
-	)
-}
-
 func makeEqualWeightPeers(count int) []*Peer {
 	peers := make([]*Peer, count)
 	for i := range peers {
@@ -129,6 +30,71 @@ func countMigratedSlots(before, after *consistentHash) int {
 
 func TestNewConsistentHashConvey(t *testing.T) {
 	convey.Convey("Test newConsistentHash", t, func() {
+		convey.Convey("assigns the full table to one peer", func() {
+			peer := testPeer("127.0.0.1:10001", 1)
+			hash := newConsistentHash([]*Peer{peer})
+
+			require.Len(t, hash.lookupTable, lookupTableSize)
+			for _, selected := range hash.lookupTable {
+				require.Same(t, peer, selected)
+			}
+			require.Same(t, peer, hash.selectPeer([]byte("first-key")))
+			require.Same(t, peer, hash.selectPeer([]byte("second-key")))
+		})
+		convey.Convey("builds deterministically", func() {
+			peers := []*Peer{
+				testPeer("127.0.0.1:10001", 2),
+				testPeer("127.0.0.1:10002", 1),
+				testPeer("127.0.0.1:10003", 1),
+			}
+
+			first := newConsistentHash(peers)
+			second := newConsistentHash(peers)
+
+			require.Equal(t, first.lookupTable, second.lookupTable)
+			for _, key := range [][]byte{
+				[]byte("connection-1"),
+				[]byte("connection-2"),
+				{0x00, 0x01, 0x02, 0x03},
+			} {
+				require.Same(t, first.selectPeer(key), second.selectPeer(key))
+			}
+		})
+		convey.Convey("distributes slots by weight", func() {
+			first := testPeer("127.0.0.1:10001", 3)
+			second := testPeer("127.0.0.1:10002", 1)
+			hash := newConsistentHash([]*Peer{first, second})
+
+			firstSlots := countPeer(hash.lookupTable, first)
+			secondSlots := countPeer(hash.lookupTable, second)
+
+			require.Len(t, hash.lookupTable, lookupTableSize)
+			require.InDelta(t, float64(lookupTableSize)*0.75, firstSlots, 1)
+			require.InDelta(t, float64(lookupTableSize)*0.25, secondSlots, 1)
+			require.Equal(t, lookupTableSize, firstSlots+secondSlots)
+		})
+		convey.Convey("limits migration when adding a peer", func() {
+			peers := makeEqualWeightPeers(8)
+			before := newConsistentHash(peers)
+			after := newConsistentHash(append(peers, testPeer("10.0.0.9:2345", 1)))
+
+			require.LessOrEqual(
+				t,
+				float64(countMigratedSlots(before, after))/float64(lookupTableSize),
+				maxConsistentHashMigrationRatio,
+			)
+		})
+		convey.Convey("limits migration when removing a peer", func() {
+			peers := makeEqualWeightPeers(8)
+			before := newConsistentHash(peers)
+			after := newConsistentHash(peers[:len(peers)-1])
+
+			require.LessOrEqual(
+				t,
+				float64(countMigratedSlots(before, after))/float64(lookupTableSize),
+				maxConsistentHashMigrationRatio,
+			)
+		})
 		convey.Convey("builds a lookup table", func() {
 			peer := testPeer("127.0.0.1:10001", 1)
 			hash := newConsistentHash([]*Peer{peer})
@@ -140,6 +106,32 @@ func TestNewConsistentHashConvey(t *testing.T) {
 
 func TestConsistentHashUpdateLookupTableConvey(t *testing.T) {
 	convey.Convey("Test consistentHash.updateLookupTable", t, func() {
+		convey.Convey("handles an empty peer set", func() {
+			hash := newConsistentHash(nil)
+
+			require.Nil(t, hash.selectPeer([]byte("key")))
+			require.ErrorIs(t, hash.updateLookupTable(nil), noPeerError)
+			require.Nil(t, hash.lookupTable)
+		})
+		convey.Convey("replaces previous peers", func() {
+			first := testPeer("127.0.0.1:10001", 1)
+			second := testPeer("127.0.0.1:10002", 1)
+			hash := newConsistentHash([]*Peer{first})
+
+			require.NoError(t, hash.updateLookupTable([]*Peer{second}))
+
+			require.NotContains(t, hash.lookupTable, first)
+			require.Same(t, second, hash.selectPeer([]byte("key")))
+		})
+		convey.Convey("clears the previous table on empty update", func() {
+			hash := newConsistentHash([]*Peer{
+				testPeer("127.0.0.1:10001", 1),
+			})
+
+			require.ErrorIs(t, hash.updateLookupTable(nil), noPeerError)
+			require.Nil(t, hash.lookupTable)
+			require.Nil(t, hash.selectPeer([]byte("key")))
+		})
 		convey.Convey("rejects no peers", func() {
 			hash := &consistentHash{}
 			convey.So(hash.updateLookupTable(nil), convey.ShouldEqual, noPeerError)

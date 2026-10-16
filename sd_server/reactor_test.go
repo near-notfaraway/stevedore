@@ -17,176 +17,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestReactorManagesSessionFDsByAddressFamily(t *testing.T) {
-	config := &sd_config.Config{
-		Server: &sd_config.ServerConfig{
-			EventSize: 8,
-			BatchSize: 32,
-			BufSize:   4096,
-		},
-		Session: &sd_config.SessionConfig{
-			RecycleIntervalSec: 1,
-			TimeoutSec:         30,
-		},
-	}
-	reactor, err := newReactor(0, config, &unix.SockaddrInet4{
-		Addr: [4]byte{127, 0, 0, 1},
-	}, nil)
-	require.NoError(t, err)
-	defer reactor.close()
-
-	key := sd_socket.SockaddrKey{}
-	sess := reactor.createSession(key)
-	require.Empty(t, sess.GetFDs())
-
-	fdProvider, ok := any(reactor).(interface {
-		getOrCreateSessionFD(*sd_session.Session, int) (int, error)
-	})
-	require.True(t, ok)
-
-	ipv4FD, err := fdProvider.getOrCreateSessionFD(sess, unix.AF_INET)
-	require.NoError(t, err)
-	reusedIPv4FD, err := fdProvider.getOrCreateSessionFD(sess, unix.AF_INET)
-	require.NoError(t, err)
-	require.Equal(t, ipv4FD, reusedIPv4FD)
-
-	ipv6FD, err := fdProvider.getOrCreateSessionFD(sess, unix.AF_INET6)
-	require.NoError(t, err)
-	require.NotEqual(t, ipv4FD, ipv6FD)
-	require.Same(t, sess, reactor.sessionsByFD[ipv4FD])
-	require.Same(t, sess, reactor.sessionsByFD[ipv6FD])
-
-	ipv4Addr, err := unix.Getsockname(ipv4FD)
-	require.NoError(t, err)
-	require.IsType(t, &unix.SockaddrInet4{}, ipv4Addr)
-	ipv6Addr, err := unix.Getsockname(ipv6FD)
-	require.NoError(t, err)
-	require.IsType(t, &unix.SockaddrInet6{}, ipv6Addr)
-
-	reactor.removeSession(sess)
-
-	require.NotContains(t, reactor.sessions, key)
-	require.NotContains(t, reactor.sessionsByFD, ipv4FD)
-	require.NotContains(t, reactor.sessionsByFD, ipv6FD)
-	_, err = unix.Getsockname(ipv4FD)
-	require.Error(t, err)
-	_, err = unix.Getsockname(ipv6FD)
-	require.Error(t, err)
-}
-
-func TestReactorForwardsIPv6PacketAndResponse(t *testing.T) {
-	config := &sd_config.Config{
-		Server: &sd_config.ServerConfig{
-			EventSize:           8,
-			BatchSize:           32,
-			BufSize:             4096,
-			MaxRecvBatchesPerFD: 1,
-		},
-		Session: &sd_config.SessionConfig{
-			RecycleIntervalSec: 1,
-			TimeoutSec:         30,
-		},
-	}
-	reactor, err := newReactor(0, config, &unix.SockaddrInet6{
-		Addr: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-	}, nil)
-	require.NoError(t, err)
-	defer reactor.close()
-
-	listenSockaddr, err := unix.Getsockname(reactor.listenFD)
-	require.NoError(t, err)
-	listenAddr := sd_socket.SockaddrToUDPAddr(listenSockaddr)
-	require.NotNil(t, listenAddr)
-
-	client, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
-	require.NoError(t, err)
-	defer client.Close()
-	backend, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
-	require.NoError(t, err)
-	defer backend.Close()
-
-	upload := []byte("ipv6 upload")
-	_, err = client.WriteToUDP(upload, listenAddr)
-	require.NoError(t, err)
-
-	reactor.rxMC.ResetNameLengths()
-	packetCount := receiveBatch(t, reactor.listenFD, reactor.rxMC)
-	require.Equal(t, 1, packetCount)
-	require.Equal(t, upload, reactor.rxMC.GetBufOfMsg(0)[:reactor.rxMC.GetLengthOfMsg(0)])
-
-	key := reactor.rxMC.GetRSockaddrKeyOfMsg(0)
-	sess := reactor.createSession(key)
-	peer := mustNewPeer(t, 0, backend.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
-	sessionFD, err := reactor.getOrCreateSessionFD(sess, peer.GetFamily())
-	require.NoError(t, err)
-	require.NoError(t, peer.Send(sessionFD, upload))
-
-	require.NoError(t, backend.SetReadDeadline(time.Now().Add(time.Second)))
-	backendBuf := make([]byte, 128)
-	n, sessionAddr, err := backend.ReadFromUDP(backendBuf)
-	require.NoError(t, err)
-	require.Equal(t, upload, backendBuf[:n])
-
-	download := []byte("ipv6 download")
-	_, err = backend.WriteToUDP(download, sessionAddr)
-	require.NoError(t, err)
-
-	clientBuf := make([]byte, 128)
-	n = receiveFromClient(t, reactor, sessionFD, sess, client, clientBuf)
-	require.Equal(t, download, clientBuf[:n])
-}
-
-func receiveBatch(t *testing.T, fd int, container *sd_socket.MMsgContainer) int {
-	t.Helper()
-
-	deadline := time.Now().Add(time.Second)
-	for {
-		n, errno := sd_socket.RecvMMsg(fd, container)
-		if n > 0 {
-			require.Zero(t, errno)
-			return n
-		}
-		if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
-			require.FailNow(t, "receive batch failed", "errno: %v", errno)
-		}
-		if time.Now().After(deadline) {
-			require.FailNow(t, "receive batch timed out")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-func receiveFromClient(
-	t *testing.T,
-	reactor *reactor,
-	sessionFD int,
-	sess *sd_session.Session,
-	client *net.UDPConn,
-	buf []byte,
-) int {
-	t.Helper()
-
-	deadline := time.Now().Add(time.Second)
-	for {
-		reactor.handleDownload(sessionFD, sess)
-		readDeadline := time.Now().Add(10 * time.Millisecond)
-		if readDeadline.After(deadline) {
-			readDeadline = deadline
-		}
-		require.NoError(t, client.SetReadDeadline(readDeadline))
-		n, _, err := client.ReadFromUDP(buf)
-		if err == nil {
-			return n
-		}
-		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-			require.NoError(t, err)
-		}
-		if time.Now().After(deadline) {
-			require.FailNow(t, "receive from client timed out")
-		}
-	}
-}
-
 func TestNewReactorConvey(t *testing.T) {
 	convey.Convey("Test newReactor", t, func() {
 		convey.Convey("initializes reactor-local resources", func() {
@@ -218,54 +48,56 @@ func TestReactorServeConvey(t *testing.T) {
 	})
 }
 
-func TestReactorUpdateUploadManagerRunsInEventLoop(t *testing.T) {
-	oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
-	newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
-	selector := &commandSelector{wakeCh: make(chan struct{}, 1)}
-	r := newConveyReactor(oldManager)
-	r.selector = selector
-	patches := gomonkey.ApplyFuncReturn(unix.Close, nil)
-	defer patches.Reset()
+func TestReactorUpdateUploadManagerConvey(t *testing.T) {
+	convey.Convey("Test reactor.updateUploadManager", t, func() {
+		convey.Convey("runs the update in the event loop", func() {
+			oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
+			newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
+			selector := &commandSelector{wakeCh: make(chan struct{}, 1)}
+			r := newConveyReactor(oldManager)
+			r.selector = selector
+			patches := gomonkey.ApplyFuncReturn(unix.Close, nil)
+			defer patches.Reset()
 
-	serveDone := make(chan error, 1)
-	go func() {
-		serveDone <- r.serve(context.Background())
-	}()
+			serveDone := make(chan error, 1)
+			go func() {
+				serveDone <- r.serve(context.Background())
+			}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	require.NoError(t, r.updateUploadManager(ctx, newManager))
-	require.NoError(t, <-serveDone)
-	require.Same(t, newManager, r.upstreamMgr)
-	require.Equal(t, 1, selector.wakes)
-}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.NoError(t, r.updateUploadManager(ctx, newManager))
+			require.NoError(t, <-serveDone)
+			require.Same(t, newManager, r.uploadMgr)
+			require.Equal(t, 1, selector.wakes)
+		})
+		convey.Convey("skips a cancelled command", func() {
+			oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
+			newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
+			r := newConveyReactor(oldManager)
 
-func TestReactorUpdateUploadManagerSkipsCanceledCommand(t *testing.T) {
-	oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
-	newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
-	r := newConveyReactor(oldManager)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			defer cancel()
+			require.ErrorIs(t, r.updateUploadManager(ctx, newManager), context.DeadlineExceeded)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(t, r.updateUploadManager(ctx, newManager), context.DeadlineExceeded)
+			r.processCommands()
 
-	r.processCommands()
+			require.Same(t, oldManager, r.uploadMgr)
+		})
+		convey.Convey("skips the command after wake failure", func() {
+			oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
+			newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
+			r := newConveyReactor(oldManager)
+			r.selector = &conveySelector{wakeErr: errors.New("wake failed")}
 
-	require.Same(t, oldManager, r.upstreamMgr)
-}
+			err := r.updateUploadManager(context.Background(), newManager)
+			require.Error(t, err)
 
-func TestReactorUpdateUploadManagerSkipsCommandAfterWakeFailure(t *testing.T) {
-	oldManager := newTestUploadManager(nil, mustNewRouter(t, "old", nil, false))
-	newManager := newTestUploadManager(nil, mustNewRouter(t, "new", nil, false))
-	r := newConveyReactor(oldManager)
-	r.selector = &conveySelector{wakeErr: errors.New("wake failed")}
+			r.processCommands()
 
-	err := r.updateUploadManager(context.Background(), newManager)
-	require.Error(t, err)
-
-	r.processCommands()
-
-	require.Same(t, oldManager, r.upstreamMgr)
+			require.Same(t, oldManager, r.uploadMgr)
+		})
+	})
 }
 
 func TestReactorNowSecConvey(t *testing.T) {
@@ -320,9 +152,9 @@ func TestReactorHandleUploadPacketConvey(t *testing.T) {
 			manager := newTestUploadManager(nil, mustNewRouter(t, "", nil, false))
 			r := newConveyReactor(manager)
 			patches := gomonkey.NewPatches()
-			patches.ApplyMethodReturn(r.rxMC, "GetLengthOfMsg", uint32(1))
-			patches.ApplyMethodReturn(r.rxMC, "GetBufOfMsg", []byte{1})
-			patches.ApplyMethodReturn(r.rxMC, "GetRSockaddrKeyOfMsg", sd_socket.SockaddrKey{})
+			patches.ApplyMethodReturn(r.rxContainer, "GetLengthOfMsg", uint32(1))
+			patches.ApplyMethodReturn(r.rxContainer, "GetBufOfMsg", []byte{1})
+			patches.ApplyMethodReturn(r.rxContainer, "GetRSockaddrKeyOfMsg", sd_socket.SockaddrKey{})
 			defer patches.Reset()
 			r.handleUploadPacket(0, 0)
 			convey.So(r.sessions, convey.ShouldHaveLength, 1)
@@ -353,6 +185,62 @@ func TestReactorGetOrCreateSessionFDConvey(t *testing.T) {
 			convey.So(fd, convey.ShouldEqual, 11)
 			convey.So(r.sessionsByFD[11], convey.ShouldEqual, sess)
 		})
+		convey.Convey("manages descriptors by address family", func() {
+			config := &sd_config.Config{
+				Server: &sd_config.ServerConfig{
+					EventSize: 8,
+					BatchSize: 32,
+					BufSize:   4096,
+				},
+				Session: &sd_config.SessionConfig{
+					RecycleIntervalSec: 1,
+					TimeoutSec:         30,
+				},
+			}
+			reactor, err := newReactor(0, config, &unix.SockaddrInet4{
+				Addr: [4]byte{127, 0, 0, 1},
+			}, nil)
+			require.NoError(t, err)
+			defer reactor.close()
+
+			key := sd_socket.SockaddrKey{}
+			sess := reactor.createSession(key)
+			require.Empty(t, sess.GetFDs())
+
+			fdProvider, ok := any(reactor).(interface {
+				getOrCreateSessionFD(*sd_session.Session, int) (int, error)
+			})
+			require.True(t, ok)
+
+			ipv4FD, err := fdProvider.getOrCreateSessionFD(sess, unix.AF_INET)
+			require.NoError(t, err)
+			reusedIPv4FD, err := fdProvider.getOrCreateSessionFD(sess, unix.AF_INET)
+			require.NoError(t, err)
+			require.Equal(t, ipv4FD, reusedIPv4FD)
+
+			ipv6FD, err := fdProvider.getOrCreateSessionFD(sess, unix.AF_INET6)
+			require.NoError(t, err)
+			require.NotEqual(t, ipv4FD, ipv6FD)
+			require.Same(t, sess, reactor.sessionsByFD[ipv4FD])
+			require.Same(t, sess, reactor.sessionsByFD[ipv6FD])
+
+			ipv4Addr, err := unix.Getsockname(ipv4FD)
+			require.NoError(t, err)
+			require.IsType(t, &unix.SockaddrInet4{}, ipv4Addr)
+			ipv6Addr, err := unix.Getsockname(ipv6FD)
+			require.NoError(t, err)
+			require.IsType(t, &unix.SockaddrInet6{}, ipv6Addr)
+
+			reactor.removeSession(sess)
+
+			require.NotContains(t, reactor.sessions, key)
+			require.NotContains(t, reactor.sessionsByFD, ipv4FD)
+			require.NotContains(t, reactor.sessionsByFD, ipv6FD)
+			_, err = unix.Getsockname(ipv4FD)
+			require.Error(t, err)
+			_, err = unix.Getsockname(ipv6FD)
+			require.Error(t, err)
+		})
 	})
 }
 
@@ -363,6 +251,101 @@ func TestReactorHandleDownloadConvey(t *testing.T) {
 			patches := gomonkey.ApplyFuncReturn(sd_socket.RecvMMsg, 0, unix.EAGAIN)
 			defer patches.Reset()
 			convey.So(r.handleDownload(1, sd_session.NewSession(sd_socket.SockaddrKey{})), convey.ShouldBeFalse)
+		})
+		convey.Convey("forwards an IPv6 response", func() {
+			config := &sd_config.Config{
+				Server: &sd_config.ServerConfig{
+					EventSize:           8,
+					BatchSize:           32,
+					BufSize:             4096,
+					MaxRecvBatchesPerFD: 1,
+				},
+				Session: &sd_config.SessionConfig{
+					RecycleIntervalSec: 1,
+					TimeoutSec:         30,
+				},
+			}
+			reactor, err := newReactor(0, config, &unix.SockaddrInet6{
+				Addr: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+			}, nil)
+			require.NoError(t, err)
+			defer reactor.close()
+
+			listenSockaddr, err := unix.Getsockname(reactor.listenFD)
+			require.NoError(t, err)
+			listenAddr := sd_socket.SockaddrToUDPAddr(listenSockaddr)
+			require.NotNil(t, listenAddr)
+
+			client, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
+			require.NoError(t, err)
+			defer client.Close()
+			backend, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
+			require.NoError(t, err)
+			defer backend.Close()
+
+			upload := []byte("ipv6 upload")
+			_, err = client.WriteToUDP(upload, listenAddr)
+			require.NoError(t, err)
+
+			reactor.rxContainer.ResetNameLengths()
+			packetCount := 0
+			receiveDeadline := time.Now().Add(time.Second)
+			for {
+				count, errno := sd_socket.RecvMMsg(reactor.listenFD, reactor.rxContainer)
+				if count > 0 {
+					require.Zero(t, errno)
+					packetCount = count
+					break
+				}
+				if errno != unix.EAGAIN && errno != unix.EWOULDBLOCK {
+					require.FailNow(t, "receive batch failed", "errno: %v", errno)
+				}
+				if time.Now().After(receiveDeadline) {
+					require.FailNow(t, "receive batch timed out")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			require.Equal(t, 1, packetCount)
+			require.Equal(t, upload, reactor.rxContainer.GetBufOfMsg(0)[:reactor.rxContainer.GetLengthOfMsg(0)])
+
+			key := reactor.rxContainer.GetRSockaddrKeyOfMsg(0)
+			sess := reactor.createSession(key)
+			peer := mustNewPeer(t, 0, backend.LocalAddr().String(), &sd_config.PeerConfig{Weight: 1})
+			sessionFD, err := reactor.getOrCreateSessionFD(sess, peer.GetFamily())
+			require.NoError(t, err)
+			require.NoError(t, peer.Send(sessionFD, upload))
+
+			require.NoError(t, backend.SetReadDeadline(time.Now().Add(time.Second)))
+			backendBuf := make([]byte, 128)
+			n, sessionAddr, err := backend.ReadFromUDP(backendBuf)
+			require.NoError(t, err)
+			require.Equal(t, upload, backendBuf[:n])
+
+			download := []byte("ipv6 download")
+			_, err = backend.WriteToUDP(download, sessionAddr)
+			require.NoError(t, err)
+
+			clientBuf := make([]byte, 128)
+			downloadDeadline := time.Now().Add(time.Second)
+			for {
+				reactor.handleDownload(sessionFD, sess)
+				readDeadline := time.Now().Add(10 * time.Millisecond)
+				if readDeadline.After(downloadDeadline) {
+					readDeadline = downloadDeadline
+				}
+				require.NoError(t, client.SetReadDeadline(readDeadline))
+				n, _, err = client.ReadFromUDP(clientBuf)
+				if err == nil {
+					break
+				}
+				if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+					require.NoError(t, err)
+				}
+				if time.Now().After(downloadDeadline) {
+					require.FailNow(t, "receive from client timed out")
+				}
+			}
+			require.Equal(t, download, clientBuf[:n])
 		})
 	})
 }
@@ -556,7 +539,7 @@ func (s *conveySelector) Close() error {
 	return nil
 }
 
-func newConveyReactor(manager *uploadManager) *reactor {
+func newConveyReactor(uploadMgr *uploadManager) *reactor {
 	return &reactor{
 		config: &sd_config.Config{
 			Server:  &sd_config.ServerConfig{MaxTryTimes: 1},
@@ -567,9 +550,9 @@ func newConveyReactor(manager *uploadManager) *reactor {
 		sessions:       make(map[sd_socket.SockaddrKey]*sd_session.Session),
 		sessionsByFD:   make(map[int]*sd_session.Session),
 		sessionWheel:   sd_session.NewWheel(1, 10, 0),
-		upstreamMgr:    manager,
-		rxMC:           sd_socket.NewMMsgContainer(1, 1),
-		txMC:           sd_socket.NewSendMMsgContainer(1),
+		uploadMgr:      uploadMgr,
+		rxContainer:    sd_socket.NewMMsgContainer(1, 1),
+		txContainer:    sd_socket.NewSendMMsgContainer(1),
 		readySet:       make(map[int]struct{}),
 		recvBatchLimit: 1,
 		clockStart:     time.Now(),

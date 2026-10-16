@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_diagnosis"
 	"github.com/near-notfaraway/stevedore/sd_route"
 	"github.com/near-notfaraway/stevedore/sd_upstream"
 )
@@ -86,13 +87,13 @@ func newUploadRegistry(config *sd_config.UploadConfig, statsEnabled bool) (*uplo
 }
 
 func (r *uploadRegistry) newManager() (*uploadManager, error) {
-	manager, err := r.upstreamRegistry.newManager()
+	upstreamMgr, err := r.upstreamRegistry.newManager()
 	if err != nil {
 		return nil, err
 	}
 	return &uploadManager{
-		upstreamManager: manager,
-		router:          r.router.Clone(),
+		upstreamMgr: upstreamMgr,
+		router:      r.router.Clone(),
 	}, nil
 }
 
@@ -140,14 +141,9 @@ func closeUpstreamDefinitions(definitions []upstreamDefinition) {
 	}
 }
 
-type uploadStats struct {
-	route     sd_route.Stats
-	upstreams []sd_upstream.Stats
-}
-
 type uploadManager struct {
-	upstreamManager *sd_upstream.Manager
-	router          *sd_route.Router
+	upstreamMgr *sd_upstream.Manager
+	router      *sd_route.Router
 }
 
 func (m *uploadManager) routeUpstream(data []byte) string {
@@ -155,17 +151,17 @@ func (m *uploadManager) routeUpstream(data []byte) string {
 }
 
 func (m *uploadManager) selectPeer(upstreamName string, data []byte) (*sd_upstream.Peer, bool) {
-	return m.upstreamManager.SelectPeer(upstreamName, data)
+	return m.upstreamMgr.SelectPeer(upstreamName, data)
 }
 
 func (m *uploadManager) markPeerDead(upstreamName string, peer *sd_upstream.Peer) {
-	m.upstreamManager.MarkPeerDead(upstreamName, peer)
+	m.upstreamMgr.MarkPeerDead(upstreamName, peer)
 }
 
-func (m *uploadManager) stats() uploadStats {
-	return uploadStats{
-		route:     m.router.Stats(),
-		upstreams: m.upstreamManager.Stats(),
+func (m *uploadManager) stats() sd_diagnosis.UploadStats {
+	return sd_diagnosis.UploadStats{
+		Route:     m.router.Stats(),
+		Upstreams: m.upstreamMgr.Stats(),
 	}
 }
 

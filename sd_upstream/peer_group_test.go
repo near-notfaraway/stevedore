@@ -9,47 +9,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestPeerGroupRefreshIncludesHealthyBackup(t *testing.T) {
-	primary := &Peer{addr: "127.0.0.1:10001", state: int32(peerAlive)}
-	backup := &Peer{addr: "127.0.0.1:10002", state: int32(peerAlive)}
-	group := &PeerGroup{
-		peers:  []*Peer{primary, backup},
-		backup: backup,
-	}
-
-	group.refresh()
-
-	require.Equal(t, []*Peer{primary, backup}, group.snapshot().peers)
-}
-
-func TestPeerGroupRefreshForcesBackupWhenAllPeersAreDead(t *testing.T) {
-	primary := &Peer{addr: "127.0.0.1:10001", state: int32(peerDead)}
-	backup := &Peer{addr: "127.0.0.1:10002", state: int32(peerDead)}
-	group := &PeerGroup{
-		peers:  []*Peer{primary, backup},
-		backup: backup,
-	}
-
-	group.refresh()
-
-	require.Equal(t, []*Peer{backup}, group.snapshot().peers)
-	require.Equal(t, peerTemp, peerState(backup.state))
-}
-
-func TestPeerGroupRefreshPublishesEmptySnapshotWithoutBackup(t *testing.T) {
-	group := &PeerGroup{
-		peers: []*Peer{
-			{addr: "127.0.0.1:10001", state: int32(peerDead)},
-		},
-	}
-
-	group.refresh()
-
-	require.Empty(t, group.snapshot().peers)
-}
-
 func TestNewPeerGroupConvey(t *testing.T) {
 	convey.Convey("Test NewPeerGroup", t, func() {
+		convey.Convey("rejects an invalid peer", func() {
+			group, err := NewPeerGroup(&sd_config.UpstreamConfig{
+				Name: "invalid",
+				Type: UpstreamTypeRR,
+				Peers: []*sd_config.PeerConfig{
+					{IP: "127.0.0.1", Port: 2345, Weight: 0},
+				},
+				HealthChecker: &sd_config.HealthCheckerConfig{
+					HeartbeatIntervalSec: 1,
+					SuccessTimes:         1,
+					FailedTimes:          1,
+				},
+			})
+
+			require.Nil(t, group)
+			require.Error(t, err)
+		})
 		convey.Convey("initializes and publishes a snapshot", func() {
 			group, err := NewPeerGroup(&sd_config.UpstreamConfig{
 				HealthChecker: &sd_config.HealthCheckerConfig{
@@ -64,47 +42,6 @@ func TestNewPeerGroupConvey(t *testing.T) {
 			convey.So(group.snapshot().peers, convey.ShouldBeEmpty)
 		})
 	})
-}
-
-func TestNewPeerGroupRejectsInvalidPeer(t *testing.T) {
-	group, err := NewPeerGroup(&sd_config.UpstreamConfig{
-		Name: "invalid",
-		Type: UpstreamTypeRR,
-		Peers: []*sd_config.PeerConfig{
-			{IP: "127.0.0.1", Port: 2345, Weight: 0},
-		},
-		HealthChecker: &sd_config.HealthCheckerConfig{
-			HeartbeatIntervalSec: 1,
-			SuccessTimes:         1,
-			FailedTimes:          1,
-		},
-	})
-
-	require.Nil(t, group)
-	require.Error(t, err)
-}
-
-func TestPeerGroupCloseClosesHealthCheckerFDs(t *testing.T) {
-	group, err := NewPeerGroup(&sd_config.UpstreamConfig{
-		Name: "closable",
-		Type: UpstreamTypeRR,
-		Peers: []*sd_config.PeerConfig{
-			{IP: "127.0.0.1", Port: 2345, Weight: 1},
-		},
-		HealthChecker: &sd_config.HealthCheckerConfig{
-			HeartbeatIntervalSec: 3600,
-			SuccessTimes:         1,
-			FailedTimes:          1,
-		},
-	})
-	require.NoError(t, err)
-	fd := group.healthChecker.checkFds[0]
-
-	group.Close()
-	group.Close()
-
-	_, err = unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
-	require.Error(t, err)
 }
 
 func TestPeerGroupSnapshotConvey(t *testing.T) {
@@ -133,6 +70,42 @@ func TestPeerGroupMarkDeadConvey(t *testing.T) {
 
 func TestPeerGroupRefreshConvey(t *testing.T) {
 	convey.Convey("Test PeerGroup.refresh", t, func() {
+		convey.Convey("includes a healthy backup", func() {
+			primary := &Peer{addr: "127.0.0.1:10001", state: int32(peerAlive)}
+			backup := &Peer{addr: "127.0.0.1:10002", state: int32(peerAlive)}
+			group := &PeerGroup{
+				peers:  []*Peer{primary, backup},
+				backup: backup,
+			}
+
+			group.refresh()
+
+			require.Equal(t, []*Peer{primary, backup}, group.snapshot().peers)
+		})
+		convey.Convey("forces backup when all peers are dead", func() {
+			primary := &Peer{addr: "127.0.0.1:10001", state: int32(peerDead)}
+			backup := &Peer{addr: "127.0.0.1:10002", state: int32(peerDead)}
+			group := &PeerGroup{
+				peers:  []*Peer{primary, backup},
+				backup: backup,
+			}
+
+			group.refresh()
+
+			require.Equal(t, []*Peer{backup}, group.snapshot().peers)
+			require.Equal(t, peerTemp, peerState(backup.state))
+		})
+		convey.Convey("publishes an empty snapshot without backup", func() {
+			group := &PeerGroup{
+				peers: []*Peer{
+					{addr: "127.0.0.1:10001", state: int32(peerDead)},
+				},
+			}
+
+			group.refresh()
+
+			require.Empty(t, group.snapshot().peers)
+		})
 		convey.Convey("publishes healthy peers", func() {
 			alive := testPeer("127.0.0.1:10001", 1)
 			dead := testPeer("127.0.0.1:10002", 1)
@@ -141,6 +114,33 @@ func TestPeerGroupRefreshConvey(t *testing.T) {
 			group.refresh()
 			convey.So(group.snapshot().version, convey.ShouldEqual, 1)
 			convey.So(group.snapshot().peers, convey.ShouldResemble, []*Peer{alive})
+		})
+	})
+}
+
+func TestPeerGroupCloseConvey(t *testing.T) {
+	convey.Convey("Test PeerGroup.Close", t, func() {
+		convey.Convey("closes health checker descriptors", func() {
+			group, err := NewPeerGroup(&sd_config.UpstreamConfig{
+				Name: "closable",
+				Type: UpstreamTypeRR,
+				Peers: []*sd_config.PeerConfig{
+					{IP: "127.0.0.1", Port: 2345, Weight: 1},
+				},
+				HealthChecker: &sd_config.HealthCheckerConfig{
+					HeartbeatIntervalSec: 3600,
+					SuccessTimes:         1,
+					FailedTimes:          1,
+				},
+			})
+			require.NoError(t, err)
+			fd := group.healthChecker.checkFds[0]
+
+			group.Close()
+			group.Close()
+
+			_, err = unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+			require.Error(t, err)
 		})
 	})
 }

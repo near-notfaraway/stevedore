@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/smartystreets/goconvey/convey"
-	"github.com/stretchr/testify/require"
 )
 
 type testStruct struct {
@@ -17,29 +16,28 @@ type testStruct struct {
 	}
 }
 
-// Should succeed unmarshal json file
-func TestUnmarshalFile_Json(t *testing.T) {
-	jsonFile := filepath.Join(t.TempDir(), "config.json")
-	err := os.WriteFile(jsonFile, []byte(`{
-		"T1": 1,
-		"T2": "2",
-		"T3": {
-			"T4": true
-		}
-	}`), 0600)
-	require.NoError(t, err)
-
-	var config testStruct
-	err = UnmarshalFile(jsonFile, &config)
-	require.NoError(t, err)
-	require.Equal(t, 1, config.T1)
-	require.Equal(t, "2", config.T2)
-	require.NotNil(t, config.T3)
-	require.True(t, config.T3.T4)
-}
-
 func TestUnmarshalFileConvey(t *testing.T) {
 	convey.Convey("Test UnmarshalFile", t, func() {
+		convey.Convey("reads and decodes JSON", func() {
+			jsonFile := filepath.Join(t.TempDir(), "config.json")
+			err := os.WriteFile(jsonFile, []byte(`{
+				"T1": 1,
+				"T2": "2",
+				"T3": {
+					"T4": true
+				}
+			}`), 0600)
+			convey.So(err, convey.ShouldBeNil)
+
+			var config testStruct
+			err = UnmarshalFile(jsonFile, &config)
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(config.T1, convey.ShouldEqual, 1)
+			convey.So(config.T2, convey.ShouldEqual, "2")
+			convey.So(config.T3, convey.ShouldNotBeNil)
+			convey.So(config.T3.T4, convey.ShouldBeTrue)
+		})
+
 		convey.Convey("reads and decodes JSON with comments", func() {
 			jsonFile := filepath.Join(t.TempDir(), "config.json")
 			err := os.WriteFile(

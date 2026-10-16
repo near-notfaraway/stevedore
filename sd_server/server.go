@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/near-notfaraway/stevedore/sd_config"
+	"github.com/near-notfaraway/stevedore/sd_diagnosis"
 	"github.com/near-notfaraway/stevedore/sd_socket"
 	"github.com/sirupsen/logrus"
 )
@@ -17,7 +18,6 @@ type Server struct {
 	reactors                 []*reactor      // independent network shards
 	uploadRegistry           *uploadRegistry // shared routing and upstream state
 	uploadManagers           []*uploadManager
-	uploadStatsEnabled       bool
 	uploadStatsInterval      time.Duration
 	retainedUploadRegistries []*uploadRegistry
 	reloadMu                 sync.Mutex
@@ -26,8 +26,8 @@ type Server struct {
 
 // NewServer builds the shared upload state and all reactor-local runtime resources.
 func NewServer(config *sd_config.Config) *Server {
-	listenSa := sd_socket.ResolveUDPSockaddr(config.Server.ListenAddr)
-	if listenSa == nil {
+	listenSockaddr := sd_socket.ResolveUDPSockaddr(config.Server.ListenAddr)
+	if listenSockaddr == nil {
 		logrus.Panicf("resolve listen addr %s failed", config.Server.ListenAddr)
 	}
 
@@ -39,22 +39,22 @@ func NewServer(config *sd_config.Config) *Server {
 		logrus.Warnf("listen parallelism %d is not supported by this platform; using 1", parallel)
 		parallel = 1
 	}
-	statsEnabled := config.Log != nil && config.Log.UploadStatsIntervalSec > 0
-	uploadRegistry, err := newUploadRegistry(config.Upload, statsEnabled)
+	var uploadStatsInterval time.Duration
+	if config.Log != nil && config.Log.UploadStatsIntervalSec > 0 {
+		uploadStatsInterval = time.Duration(config.Log.UploadStatsIntervalSec) * time.Second
+	}
+	uploadRegistry, err := newUploadRegistry(config.Upload, uploadStatsInterval > 0)
 	if err != nil {
 		logrus.Panicf("create upload registry failed: %v", err)
 	}
 	s := &Server{
-		reactors:           make([]*reactor, 0, parallel),
-		uploadRegistry:     uploadRegistry,
-		uploadManagers:     make([]*uploadManager, 0, parallel),
-		uploadStatsEnabled: statsEnabled,
-	}
-	if statsEnabled {
-		s.uploadStatsInterval = time.Duration(config.Log.UploadStatsIntervalSec) * time.Second
+		reactors:            make([]*reactor, 0, parallel),
+		uploadRegistry:      uploadRegistry,
+		uploadManagers:      make([]*uploadManager, 0, parallel),
+		uploadStatsInterval: uploadStatsInterval,
 	}
 	for i := 0; i < parallel; i++ {
-		manager, err := s.uploadRegistry.newManager()
+		uploadMgr, err := s.uploadRegistry.newManager()
 		if err != nil {
 			for _, initialized := range s.reactors {
 				initialized.close()
@@ -62,7 +62,7 @@ func NewServer(config *sd_config.Config) *Server {
 			s.uploadRegistry.close()
 			logrus.Panicf("create upload manager %d failed: %v", i, err)
 		}
-		reactor, err := newReactor(i, config, listenSa, manager)
+		reactor, err := newReactor(i, config, listenSockaddr, uploadMgr)
 		if err != nil {
 			for _, initialized := range s.reactors {
 				initialized.close()
@@ -71,7 +71,7 @@ func NewServer(config *sd_config.Config) *Server {
 			logrus.Panicf("create reactor %d failed: %v", i, err)
 		}
 		s.reactors = append(s.reactors, reactor)
-		s.uploadManagers = append(s.uploadManagers, manager)
+		s.uploadManagers = append(s.uploadManagers, uploadMgr)
 	}
 	return s
 }
@@ -81,7 +81,7 @@ func (s *Server) ReloadUpload(ctx context.Context, config *sd_config.UploadConfi
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
 
-	registry, err := newUploadRegistry(config, s.uploadStatsEnabled)
+	registry, err := newUploadRegistry(config, s.uploadStatsInterval > 0)
 	if err != nil {
 		return fmt.Errorf("build upload registry: %w", err)
 	}
@@ -92,22 +92,22 @@ func (s *Server) ReloadUpload(ctx context.Context, config *sd_config.UploadConfi
 		}
 	}()
 
-	managers := make([]*uploadManager, len(s.reactors))
-	for i := range managers {
-		manager, buildErr := registry.newManager()
+	uploadManagers := make([]*uploadManager, len(s.reactors))
+	for i := range uploadManagers {
+		uploadMgr, buildErr := registry.newManager()
 		if buildErr != nil {
 			return fmt.Errorf("build upload manager %d: %w", i, buildErr)
 		}
-		managers[i] = manager
+		uploadManagers[i] = uploadMgr
 	}
 
 	s.uploadMu.Lock()
 	oldRegistry := s.uploadRegistry
-	oldManagers := s.uploadManagers
-	switched, switchErr := updateReactorManagers(ctx, s.reactors, managers, nil)
+	oldUploadManagers := s.uploadManagers
+	switched, switchErr := updateReactorManagers(ctx, s.reactors, uploadManagers, nil)
 	if switchErr != nil {
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), uploadRollbackTimeout)
-		_, rollbackErr := updateReactorManagers(rollbackCtx, s.reactors, oldManagers, switched)
+		_, rollbackErr := updateReactorManagers(rollbackCtx, s.reactors, oldUploadManagers, switched)
 		cancel()
 		if rollbackErr != nil {
 			s.retainedUploadRegistries = append(s.retainedUploadRegistries, registry)
@@ -120,7 +120,7 @@ func (s *Server) ReloadUpload(ctx context.Context, config *sd_config.UploadConfi
 		return fmt.Errorf("switch upload managers: %w", switchErr)
 	}
 	s.uploadRegistry = registry
-	s.uploadManagers = managers
+	s.uploadManagers = uploadManagers
 	retainedRegistries := s.retainedUploadRegistries
 	s.retainedUploadRegistries = nil
 	committed = true
@@ -155,10 +155,10 @@ func (s *Server) closeUploadRegistries() {
 }
 
 // updateReactorManagers switches selected reactors concurrently and reports partial success.
-func updateReactorManagers(ctx context.Context, reactors []*reactor, managers []*uploadManager,
+func updateReactorManagers(ctx context.Context, reactors []*reactor, uploadManagers []*uploadManager,
 	selected []bool) ([]bool, error) {
-	if len(reactors) != len(managers) {
-		return nil, fmt.Errorf("reactor count %d does not match manager count %d", len(reactors), len(managers))
+	if len(reactors) != len(uploadManagers) {
+		return nil, fmt.Errorf("reactor count %d does not match manager count %d", len(reactors), len(uploadManagers))
 	}
 	if selected != nil && len(selected) != len(reactors) {
 		return nil, fmt.Errorf("selected count %d does not match reactor count %d", len(selected), len(reactors))
@@ -174,7 +174,7 @@ func updateReactorManagers(ctx context.Context, reactors []*reactor, managers []
 		wg.Add(1)
 		go func(id int, r *reactor) {
 			defer wg.Done()
-			errs[id] = r.updateUploadManager(ctx, managers[id])
+			errs[id] = r.updateUploadManager(ctx, uploadManagers[id])
 			switched[id] = errs[id] == nil
 		}(i, current)
 	}
@@ -188,58 +188,17 @@ func updateReactorManagers(ctx context.Context, reactors []*reactor, managers []
 	return switched, nil
 }
 
-func (s *Server) runUploadStatsLogger(ctx context.Context) {
-	if s.uploadStatsInterval <= 0 {
-		return
-	}
-
-	ticker := time.NewTicker(s.uploadStatsInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			s.logUploadStats()
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// logUploadStats aggregates the current generation and emits one structured log entry.
-func (s *Server) logUploadStats() {
-	stats := s.uploadStats()
-	routes := make(map[string]uint64, len(stats.route.Routes))
-	for _, route := range stats.route.Routes {
-		routes[route.Name] = route.Matches
-	}
-	upstreams := make(map[string]map[string]uint64, len(stats.upstreams))
-	for _, upstream := range stats.upstreams {
-		upstreams[upstream.Name] = map[string]uint64{
-			"selections":         upstream.Selections,
-			"selection_failures": upstream.SelectionFailures,
-			"peer_failures":      upstream.PeerFailures,
-		}
-	}
-	logrus.WithFields(logrus.Fields{
-		"default_routes": stats.route.DefaultRoutes,
-		"short_payloads": stats.route.ShortPayloads,
-		"drops":          stats.route.Drops,
-		"routes":         routes,
-		"upstreams":      upstreams,
-	}).Info("upload stats")
-}
-
-func (s *Server) uploadStats() uploadStats {
+func (s *Server) uploadStats() sd_diagnosis.UploadStats {
 	s.uploadMu.RLock()
 	defer s.uploadMu.RUnlock()
 
 	if len(s.uploadManagers) == 0 {
-		return uploadStats{}
+		return sd_diagnosis.UploadStats{}
 	}
 
 	stats := s.uploadManagers[0].stats()
-	for _, manager := range s.uploadManagers[1:] {
-		addUploadStats(&stats, manager.stats())
+	for _, uploadMgr := range s.uploadManagers[1:] {
+		addUploadStats(&stats, uploadMgr.stats())
 	}
 	return stats
 }
@@ -252,7 +211,7 @@ func (s *Server) ListenAndServe(parent context.Context) error {
 
 	// start upload stats logger.
 	if s.uploadStatsInterval > 0 {
-		go s.runUploadStatsLogger(ctx)
+		go sd_diagnosis.RunUploadStatsLogger(ctx, s.uploadStatsInterval, s.uploadStats)
 	}
 
 	// run reactors concurrently.
@@ -290,16 +249,27 @@ func (s *Server) ListenAndServe(parent context.Context) error {
 	return nil
 }
 
-func addUploadStats(total *uploadStats, current uploadStats) {
-	total.route.DefaultRoutes += current.route.DefaultRoutes
-	total.route.ShortPayloads += current.route.ShortPayloads
-	total.route.Drops += current.route.Drops
-	for i := range total.route.Routes {
-		total.route.Routes[i].Matches += current.route.Routes[i].Matches
+func addUploadStats(total *sd_diagnosis.UploadStats, current sd_diagnosis.UploadStats) {
+	total.Route.DefaultRoutes += current.Route.DefaultRoutes
+	total.Route.ShortPayloads += current.Route.ShortPayloads
+	total.Route.Drops += current.Route.Drops
+	for i := range total.Route.Routes {
+		total.Route.Routes[i].Matches += current.Route.Routes[i].Matches
 	}
-	for i := range total.upstreams {
-		total.upstreams[i].Selections += current.upstreams[i].Selections
-		total.upstreams[i].SelectionFailures += current.upstreams[i].SelectionFailures
-		total.upstreams[i].PeerFailures += current.upstreams[i].PeerFailures
+	for i := range total.Upstreams {
+		total.Upstreams[i].Selections += current.Upstreams[i].Selections
+		total.Upstreams[i].SelectionFailures += current.Upstreams[i].SelectionFailures
+		total.Upstreams[i].PeerFailures += current.Upstreams[i].PeerFailures
 	}
+}
+
+// ValidateRuntimeConfig checks server-specific runtime semantics without creating resources.
+func ValidateRuntimeConfig(config *sd_config.Config) error {
+	if sd_socket.ResolveUDPSockaddr(config.Server.ListenAddr) == nil {
+		return fmt.Errorf("server listen address %q is invalid", config.Server.ListenAddr)
+	}
+	if _, err := validateUploadConfig(config.Upload, false); err != nil {
+		return fmt.Errorf("upload config is invalid: %w", err)
+	}
+	return nil
 }
