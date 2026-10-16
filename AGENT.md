@@ -11,13 +11,17 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
 - Go 版本：以 `go.mod` 为准
 - 程序入口：`main.go`
 - 配置示例：`sd_config/config.example.json`
-- 支持的配置格式：JSON/JSONC 和 YAML
+- 支持的配置格式：JSON/JSONC 和 `.yaml`
 - 运行目标：Linux amd64、Darwin amd64/arm64
-- 命令行配置参数：`-config`
+- 常用命令行参数：`-c`（配置）、`-t`（校验）、`-s`（信号）、`-v`（版本）
+- 可热更新配置：仅 `Upload` 段
 
 ## 请求流程
 
-1. `main.go` 加载配置、按需启动 pprof、初始化日志并启动
+1. `main.go` 解析互斥的运行、校验、信号和版本动作。运行与校验动作先通过
+   `sd_config.Load` 加载配置并填充 `Common` 默认路径，再依次执行
+   `sd_config.ValidateConfig` 和 `sd_server.ValidateRuntimeConfig`。运行时切换
+   工作目录、初始化日志和 PID 文件，按需启动 pprof，最后启动
    `sd_server.Server`。
 2. Linux 上，`sd_server.Server` 创建 `ListenParallel` 个独立 Reactor。macOS
    的 `SO_REUSEPORT` 不提供 Linux 式多 listener 分流，因此有效并行度固定为
@@ -31,8 +35,8 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
    自唤醒下一轮，避免热点 fd 饿死其他 Session。Linux 自唤醒使用 `eventfd`，
    macOS 使用 `EVFILT_USER`。
 4. Linux 下游地址由内核 `SO_REUSEPORT` 哈希稳定分配到 Reactor；macOS
-   仅运行单 Reactor。Reactor 本地 Session 持有用于上游通信的 UDP fd，并
-   注册到同一个 selector。
+   仅运行单 Reactor。Reactor 本地 Session 按 IPv4、IPv6 地址族分别持有
+   上游 UDP fd，并注册到同一个 selector。
 5. `sd_server.uploadRegistry` 共享只读路由规则、健康检查和版本化 Peer
    快照；每个 Reactor 拥有独立 Router、Upstream selector、RR 游标、RR
    列表、一致性哈希表和统计计数器。Server 汇总各 Reactor 的统计快照。
@@ -40,25 +44,34 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
    `DefaultUpstream`。空字符串和保留值 `drop` 表示丢弃，其他 Upstream
    引用在启动时校验。
 6. 选中的 Upstream 通过加权轮询或一致性哈希选择健康 Peer，并发送数据包。
+   CHash key 支持固定区间、多区间拼接、掩码和长度字段提取；无效 key 按
+   `InvalidKeyPolicy` 丢弃或回退 RR。每个 Upstream 最多有一个 Backup
+   Peer，它平时正常参与负载均衡，仅在所有 Peer 不可用时强制兜底。
 7. 同一个 Reactor 批量读取 Session fd 的上游响应，通过自己的监听 fd
    发送回原始下游地址。Linux 的 TX iovec 直接引用当前 RX batch payload，
    使用 `sendmmsg` 批量发送；macOS 通过同一 Container 接口逐包调用
    `sendmsg`。Session 活跃时在 Reactor 本地侵入式时间轮中 O(1) 续期；
    selector 超时周期只处理当前到期桶，不遍历完整 Session 表。
+8. 收到 `SIGHUP` 或 `-s reload` 时，主进程重新读取原配置文件，只允许
+   `Upload` 发生变化。Server 先完整构建新的 Registry 和各 Reactor 的
+   Manager，再通过 Reactor 命令切换；部分切换失败时尝试回滚。切换成功后
+   关闭旧健康检查，已有 Session 保持不变。`SIGTERM`、`SIGQUIT` 和
+   `SIGINT` 会唤醒 selector，并等待所有 Reactor 释放资源后退出。
 
 ## 包职责
 
-- `sd_config`：仅定义配置结构。
+- `sd_config`：命令行选项、配置结构、文件加载、`Common` 默认值填充、基础
+  字段校验和非 `Upload` 热更新差异校验。
+- `sd_diagnosis`：日志初始化，以及路由和 Upstream 统计的周期输出。
 - `sd_server`：服务生命周期、分片 Reactor、Reactor 本地 Session 表及
-  上传/下载数据包循环。
+  上传/下载数据包循环，并负责 `Upload` 配置的构建、切换和回滚。
 - `sd_session`：由 Reactor 独占的 Session 状态和侵入式过期时间轮。
 - `sd_socket`：平台 selector、套接字、sockaddr 和批量消息接口封装。带
   `_linux.go`/`_darwin.go` 后缀的文件持有平台系统调用细节。
 - `sd_route`：不可变 payload 路由规则、顺序匹配和默认 Upstream 选择。
 - `sd_upstream`：共享 Peer/健康检查控制面，以及 Reactor 本地轮询和一致性
   哈希数据面。
-- `sd_util`：配置解码、字节匹配和日志。
-- `doc/media`：README 使用的图片。
+- `sd_util`：配置文件解码、字节转换与匹配，以及 PID 文件管理。
 
 保持以上包职责，不要将系统调用细节移入 Server 或业务路由代码。
 
@@ -87,6 +100,10 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
   本机平台运行 `go test -race ./...`。
 - Peer 健康快照由 Registry 原子发布；RR 游标、RR 列表和一致性哈希表必须
   保持 Reactor 本地所有权。
+- 热更新必须先完整构建并校验候选 `Upload`，再通知 Reactor 切换。不得在
+  构建失败时修改当前代，也不得因热更新清理已有 Session。
+- `ValidateUploadReload` 只比较并拒绝非 `Upload` 配置变化，不填充默认值；
+  配置归一化统一由 `Load` 调用 `applyCommonDefaults` 完成。
 - 不要仅为了通过测试而改变正确的生产逻辑。当实现契约本身正确时，应修正
   错误的断言或 Mock。
 - 修改纯逻辑时添加聚焦的测试。网络生命周期改动应增加对应平台的集成测试，
@@ -152,7 +169,7 @@ Stevedore 是一个使用 Go 编写、支持 Linux 和 macOS 的四层 UDP 负�
 在 macOS 中：
 
 ```bash
-go test ./...
+go test -gcflags="all=-l -N" ./...
 go test -race ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
@@ -162,9 +179,9 @@ make build-darwin
 在 Linux 环境中：
 
 ```bash
-go test ./...
+go test -gcflags="all=-l -N" ./...
 go test -race ./...
-make build
+make build-linux
 ```
 
 常用 Make 目标：
@@ -173,24 +190,28 @@ make build
 make test
 make test-race
 make build
+make build-linux
 make build-darwin DARWIN_ARCH=arm64
 ```
 
-`make build` 固定生成 Linux amd64 生产二进制。`make build-darwin` 默认
-使用当前 Go 工具链的架构，也可通过 `DARWIN_ARCH=amd64` 或 `arm64` 指定。
+`make build` 按当前 `GOOS` 构建 `stevedore`；`make build-linux` 固定生成
+Linux amd64 二进制。`make build-darwin` 默认使用当前 Go 工具链的架构，
+也可通过 `DARWIN_ARCH=amd64` 或 `arm64` 指定。
 
 ## 打包与运行
 
-`make build` 会在仓库根目录交叉编译名为 `stevedore` 的 Linux amd64
-静态二进制文件。`make package` 会将其移动到
+`make all` 依次执行测试、清理输出目录、按当前 `GOOS` 构建和打包。
+`make package` 会将仓库根目录下的 `stevedore` 移动到
 `output/stevedore/bin/`，将示例配置复制到 `output/stevedore/etc/`，
-并生成 `output/stevedore.tgz`。
+并生成 `output/stevedore.tgz`。单独执行 `make package` 前必须先生成
+名为 `stevedore` 的二进制。
 
 运行打包后的程序：
 
 ```bash
 cd output/stevedore
-bin/stevedore -config etc/config.example.json
+bin/stevedore -c etc/config.example.json -t
+bin/stevedore -c etc/config.example.json
 ```
 
 示例日志路径相对于进程工作目录解析。健康检查和配置的 Peer 需要可访问的
@@ -205,5 +226,9 @@ UDP 端点，不要期待使用示例中的 `10.0.0.x` 地址完成成功的冒�
 - Peer 列表更新不会与 Peer 选择发生竞态。
 - 空 Peer 集合、非法权重和缺少备用 Peer 的情况得到安全处理。
 - 路由和默认上游的数据包丢弃行为符合预期。
+- CHash key 提取失败时遵循 `InvalidKeyPolicy`，固定区间和长度字段均已做
+  payload 边界检查。
+- 热更新拒绝所有非 `Upload` 变化；候选配置失败或 Reactor 切换失败时不
+  破坏当前代，成功切换后旧 Registry 会被关闭。
 - Darwin 上不会为 `ListenParallel > 1` 创建冗余 Reactor。
 - 使用上述命令通过本机测试、race 测试和 Linux 交叉构建。
